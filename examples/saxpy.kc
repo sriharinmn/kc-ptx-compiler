@@ -1,0 +1,8 @@
+// SAXPY ("single-precision a times x plus y"): y = a * x + y.
+// The classic first GPU kernel.
+kernel saxpy(n: i32, a: f32, x: *f32, y: *f32) {
+    let i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) {
+        y[i] = a * x[i] + y[i];
+    }
+}

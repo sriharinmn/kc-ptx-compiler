@@ -1,0 +1,5 @@
+build/
+*.ptx
+!tests/ptx/*.ptx
+*.cubin
+*.o

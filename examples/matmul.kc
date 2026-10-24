@@ -1,0 +1,14 @@
+// Naive matrix multiply C = A * B for n x n matrices (row by row in memory).
+// One thread computes one element of C.
+kernel matmul(a: *f32, b: *f32, c: *f32, n: i32) {
+    let idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n * n) {
+        let row = idx / n;
+        let col = idx % n;
+        let sum = 0.0;
+        for (let k = 0; k < n; k += 1) {
+            sum += a[row * n + k] * b[k * n + col];
+        }
+        c[idx] = sum;
+    }
+}

@@ -1,0 +1,7 @@
+// c[i] = a[i] + b[i], one GPU thread per element.
+kernel vector_add(a: *f32, b: *f32, c: *f32, n: i32) {
+    let i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) {
+        c[i] = a[i] + b[i];
+    }
+}

@@ -1,0 +1,9 @@
+// y = 2 * x using a "grid-stride loop": each thread handles elements
+// i, i + stride, i + 2*stride, ... so any n works with a fixed number of threads.
+// This is the standard CUDA pattern for big arrays.
+kernel scale2(x: *f32, y: *f32, n: i32) {
+    let stride = gridDim.x * blockDim.x;
+    for (let i = blockIdx.x * blockDim.x + threadIdx.x; i < n; i += stride) {
+        y[i] = 2.0 * x[i];
+    }
+}

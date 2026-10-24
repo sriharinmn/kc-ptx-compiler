@@ -1,0 +1,14 @@
+// ReLU, the most common neural-network activation: y = max(x, 0).
+// Shows an early return and a variable that is changed inside an if
+// (the compiler needs a phi to merge the two possible values of v).
+kernel relu(x: *f32, y: *f32, n: i32) {
+    let i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) {
+        return;
+    }
+    let v = x[i];
+    if (v < 0.0) {
+        v = 0.0;
+    }
+    y[i] = v;
+}

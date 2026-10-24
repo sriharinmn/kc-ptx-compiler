@@ -1,0 +1,12 @@
+// out[r] = sum of row r of a rows x cols matrix (stored row by row).
+// One thread per row, with a loop over the columns.
+kernel row_sum(m: *f32, out: *f32, rows: i32, cols: i32) {
+    let r = blockIdx.x * blockDim.x + threadIdx.x;
+    if (r < rows) {
+        let sum = 0.0;
+        for (let c = 0; c < cols; c += 1) {
+            sum += m[r * cols + c];
+        }
+        out[r] = sum;
+    }
+}
