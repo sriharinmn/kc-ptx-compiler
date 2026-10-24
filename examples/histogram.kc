@@ -1,0 +1,10 @@
+// Histogram: count how many values fall into each bin.
+// Many threads may hit the same bin at the same time, so the count is
+// increased with atomic_add, which the hardware performs one at a time.
+kernel histogram(data: *i32, bins: *i32, n: i32, nbins: i32) {
+    let i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) {
+        let b = data[i] % nbins;
+        atomic_add(bins[b], 1);
+    }
+}

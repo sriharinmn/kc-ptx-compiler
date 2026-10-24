@@ -1,15 +1,18 @@
 #include "lexer.h"
 
+#include <algorithm>
 #include <cctype>
 #include <unordered_map>
 
 namespace {
 
 const std::unordered_map<std::string, Tok> kKeywords = {
-    {"kernel", Tok::KwKernel}, {"let", Tok::KwLet},       {"if", Tok::KwIf},
-    {"else", Tok::KwElse},     {"while", Tok::KwWhile},   {"for", Tok::KwFor},
-    {"return", Tok::KwReturn}, {"true", Tok::KwTrue},     {"false", Tok::KwFalse},
-    {"i32", Tok::KwI32},       {"f32", Tok::KwF32},       {"bool", Tok::KwBool},
+    {"kernel", Tok::KwKernel}, {"fn", Tok::KwFn},           {"let", Tok::KwLet},
+    {"shared", Tok::KwShared}, {"if", Tok::KwIf},           {"else", Tok::KwElse},
+    {"while", Tok::KwWhile},   {"for", Tok::KwFor},         {"break", Tok::KwBreak},
+    {"continue", Tok::KwContinue}, {"return", Tok::KwReturn}, {"true", Tok::KwTrue},
+    {"false", Tok::KwFalse},   {"i32", Tok::KwI32},         {"f32", Tok::KwF32},
+    {"bool", Tok::KwBool},
 };
 
 bool isDigit(char c) { return c >= '0' && c <= '9'; }
@@ -121,6 +124,7 @@ private:
             {">=", Tok::Ge},         {"==", Tok::EqEq},        {"!=", Tok::NotEq},
             {"<<", Tok::Shl},        {">>", Tok::Shr},         {"+=", Tok::PlusAssign},
             {"-=", Tok::MinusAssign}, {"*=", Tok::StarAssign}, {"/=", Tok::SlashAssign},
+            {"->", Tok::Arrow},
         };
         for (const auto& t : kTwoChar) {
             if (peek() == t.text[0] && peek(1) == t.text[1]) {
@@ -165,6 +169,25 @@ private:
 
 std::vector<Token> lex(const std::string& source) { return Lexer(source).run(); }
 
+std::string printTokens(const std::vector<Token>& tokens) {
+    std::string out;
+    for (const Token& t : tokens) {
+        const char* kind = "symbol";
+        if (t.kind == Tok::End) kind = "end";
+        else if (t.kind == Tok::Ident) kind = "name";
+        else if (t.kind == Tok::IntLit) kind = "int";
+        else if (t.kind == Tok::FloatLit) kind = "float";
+        else if (t.kind >= Tok::KwKernel && t.kind <= Tok::KwBool) kind = "keyword";
+
+        std::string pos = std::to_string(t.loc.line) + ":" + std::to_string(t.loc.col);
+        pos.resize(std::max<size_t>(pos.size() + 1, 8), ' ');
+        std::string k = kind;
+        k.resize(9, ' ');
+        out += pos + k + t.text + "\n";
+    }
+    return out;
+}
+
 const char* tokName(Tok t) {
     switch (t) {
         case Tok::End: return "end of file";
@@ -172,11 +195,15 @@ const char* tokName(Tok t) {
         case Tok::IntLit: return "an integer";
         case Tok::FloatLit: return "a float";
         case Tok::KwKernel: return "'kernel'";
+        case Tok::KwFn: return "'fn'";
         case Tok::KwLet: return "'let'";
+        case Tok::KwShared: return "'shared'";
         case Tok::KwIf: return "'if'";
         case Tok::KwElse: return "'else'";
         case Tok::KwWhile: return "'while'";
         case Tok::KwFor: return "'for'";
+        case Tok::KwBreak: return "'break'";
+        case Tok::KwContinue: return "'continue'";
         case Tok::KwReturn: return "'return'";
         case Tok::KwTrue: return "'true'";
         case Tok::KwFalse: return "'false'";
@@ -193,6 +220,7 @@ const char* tokName(Tok t) {
         case Tok::Semi: return "';'";
         case Tok::Colon: return "':'";
         case Tok::Dot: return "'.'";
+        case Tok::Arrow: return "'->'";
         case Tok::Plus: return "'+'";
         case Tok::Minus: return "'-'";
         case Tok::Star: return "'*'";

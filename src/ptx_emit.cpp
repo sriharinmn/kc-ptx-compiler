@@ -28,6 +28,32 @@ std::string f32Hex(float f) {
     return buf;
 }
 
+// Device functions pass every argument and the return value through .param
+// memory as plain bits: .b32 for i32/f32/bool, .b64 for pointers. (A bool
+// travels as a 32-bit 0 or 1, because .param memory cannot hold predicates.)
+const char* paramBits(IrType t) { return t == IrType::U64 ? ".b64" : ".b32"; }
+
+std::string retvalName(const IrFunction& f) { return f.name + "_retval"; }
+std::string paramName(const IrFunction& f, int i) { return f.name + "_param_" + std::to_string(i); }
+
+// ".visible .entry k(...)" for kernels, ".func (.param .b32 f_retval) f(...)" for device functions.
+std::string signature(const IrFunction& f) {
+    std::string s;
+    if (f.isKernel) {
+        s = ".visible .entry " + f.name + "(";
+    } else {
+        s = ".func ";
+        if (f.retType != IrType::Void) s += std::string("(.param ") + paramBits(f.retType) + " " + retvalName(f) + ") ";
+        s += f.name + "(";
+    }
+    for (size_t i = 0; i < f.params.size(); ++i) {
+        IrType t = f.params[i]->type;
+        const char* ptxType = !f.isKernel ? paramBits(t) : t == IrType::F32 ? ".f32" : t == IrType::U64 ? ".u64" : ".u32";
+        s += std::string(i ? ",\n" : "\n") + "\t.param " + ptxType + " " + paramName(f, static_cast<int>(i));
+    }
+    return s + "\n)";
+}
+
 // Type suffix of a PTX instruction, e.g. the ".s32" in "add.s32".
 std::string sfx(IrType t) {
     switch (t) {
@@ -73,13 +99,7 @@ public:
 
         // 3. Signature and register declarations (the counts are only known now).
         std::ostringstream out;
-        out << ".visible .entry " << fn_.name << "(";
-        for (size_t i = 0; i < fn_.params.size(); ++i) {
-            IrType t = fn_.params[i]->type;
-            const char* ptxType = t == IrType::F32 ? ".f32" : t == IrType::U64 ? ".u64" : ".u32";
-            out << (i ? ",\n" : "\n") << "\t.param " << ptxType << " " << paramName(static_cast<int>(i));
-        }
-        out << "\n)\n{\n";
+        out << signature(fn_) << "\n{\n";
         static const char* kDecl[] = {"", ".pred", ".b32", ".f32", ".b64"};
         for (int t = 1; t < 5; ++t)
             if (count_[t]) out << "\t.reg " << kDecl[t] << " \t" << kPrefix[t] << "<" << count_[t] << ">;\n";
@@ -109,13 +129,13 @@ private:
         return "$L__BB" + std::to_string(index_) + "_" + std::to_string(b->id);
     }
 
-    std::string paramName(int i) const { return fn_.name + "_param_" + std::to_string(i); }
 
     // Writes one instruction, with a tab between opcode and operands (like nvcc's output).
+    // Declarations such as ".param .b32 param0" are written as they are.
     void ins(const std::string& text) {
         size_t opcodeStart = text[0] == '@' ? text.find(' ') + 1 : 0;  // skip a "@%p0 " guard
         size_t split = text.find(' ', opcodeStart);
-        if (split == std::string::npos)
+        if (split == std::string::npos || text[0] == '.')
             body_ << "\t" << text << ";\n";
         else
             body_ << "\t" << text.substr(0, split) << " \t" << text.substr(split + 1) << ";\n";
@@ -136,18 +156,20 @@ private:
                 else
                     ins("mov." + sfx(in->type) + " " + r(in) + ", " + std::to_string(in->imm));
                 break;
-            case Opc::Param:
-                if (in->type == IrType::U64) {
-                    // Pointer arguments are generic addresses; ld.global/st.global
+            case Opc::Param: {
+                std::string p = "[" + paramName(fn_, in->paramIndex) + "]";
+                if (in->type == IrType::U64 && fn_.isKernel) {
+                    // Kernel pointer arguments are generic addresses; ld.global/st.global
                     // need global-memory addresses, so convert them (like nvcc does).
+                    // Device functions receive pointers that are already converted.
                     std::string tmp = newReg(IrType::U64);
-                    ins("ld.param.u64 " + tmp + ", [" + paramName(in->paramIndex) + "]");
+                    ins("ld.param.u64 " + tmp + ", " + p);
                     ins("cvta.to.global.u64 " + r(in) + ", " + tmp);
                 } else {
-                    ins(std::string("ld.param.") + (isF32 ? "f32 " : "u32 ") + r(in) + ", [" +
-                        paramName(in->paramIndex) + "]");
+                    readParam(r(in), in->type, p);
                 }
                 break;
+            }
             case Opc::SReg: ins("mov.u32 " + r(in) + ", %" + in->name); break;
             case Opc::Add: binary("add." + sfx(in->type), in); break;
             case Opc::Sub: binary("sub." + sfx(in->type), in); break;
@@ -172,6 +194,11 @@ private:
             case Opc::CvtI2F: ins("cvt.rn.f32.s32 " + r(in) + ", " + r(in->ops[0])); break;
             // .rzi rounds toward zero, which is what C does for (int)x.
             case Opc::CvtF2I: ins("cvt.rzi.s32.f32 " + r(in) + ", " + r(in->ops[0])); break;
+            case Opc::Min: binary("min." + sfx(in->type), in); break;
+            case Opc::Max: binary("max." + sfx(in->type), in); break;
+            case Opc::Abs: ins("abs." + sfx(in->type) + " " + r(in) + ", " + r(in->ops[0])); break;
+            // sqrt.rn = IEEE-correct square root (nvcc's default too).
+            case Opc::Sqrt: ins("sqrt.rn.f32 " + r(in) + ", " + r(in->ops[0])); break;
             case Opc::ElemAddr: {
                 // addr = base + index * 4   (mul.wide gives a 64-bit result from 32-bit inputs)
                 std::string offset = newReg(IrType::U64);
@@ -179,18 +206,77 @@ private:
                 ins("add.s64 " + r(in) + ", " + r(in->ops[0]) + ", " + offset);
                 break;
             }
+            // The address of a .shared variable is its position in the block's shared memory.
+            case Opc::SharedAddr: ins("mov.u64 " + r(in) + ", " + in->name); break;
             case Opc::Load:
-                ins(std::string("ld.global.") + (isF32 ? "f32 " : "u32 ") + r(in) + ", [" + r(in->ops[0]) + "]");
+                ins("ld" + space(in) + (isF32 ? ".f32 " : ".u32 ") + r(in) + ", [" + r(in->ops[0]) + "]");
                 break;
             case Opc::Store:
-                ins(std::string("st.global.") + (in->memType == IrType::F32 ? "f32" : "u32") + " [" +
-                    r(in->ops[0]) + "], " + r(in->ops[1]));
+                ins("st" + space(in) + (in->memType == IrType::F32 ? ".f32" : ".u32") + " [" + r(in->ops[0]) +
+                    "], " + r(in->ops[1]));
                 break;
+            case Opc::AtomicAdd:
+                ins("atom" + space(in) + ".add." + sfx(in->type) + " " + r(in) + ", [" + r(in->ops[0]) + "], " +
+                    r(in->ops[1]));
+                break;
+            // Barrier 0 is the one __syncthreads() uses.
+            case Opc::Barrier: ins("bar.sync 0"); break;
+            case Opc::Call: call(in); break;
             case Opc::Phi:
             case Opc::Br:
             case Opc::CondBr:
             case Opc::Ret: break;  // handled in run()
         }
+    }
+
+    static std::string space(const Inst* in) { return in->shared ? ".shared" : ".global"; }
+
+    // Reads a .param slot into a register. A bool arrives as a 32-bit 0/1 and becomes a predicate.
+    void readParam(const std::string& dst, IrType t, const std::string& slot) {
+        if (t == IrType::Pred) {
+            std::string bits = newReg(IrType::S32);
+            ins("ld.param.b32 " + bits + ", " + slot);
+            ins("setp.ne.s32 " + dst + ", " + bits + ", 0");
+        } else {
+            const char* type = t == IrType::F32 ? "f32" : t == IrType::U64 ? "b64" : "b32";
+            ins(std::string("ld.param.") + type + " " + dst + ", " + slot);
+        }
+    }
+
+    // Writes a register into a .param slot (the reverse of readParam).
+    void writeParam(const std::string& slot, const Inst* v) {
+        if (v->type == IrType::Pred) {
+            std::string bits = newReg(IrType::S32);
+            ins("selp.b32 " + bits + ", 1, 0, " + r(v));
+            ins("st.param.b32 " + slot + ", " + bits);
+        } else {
+            const char* type = v->type == IrType::F32 ? "f32" : v->type == IrType::U64 ? "b64" : "b32";
+            ins(std::string("st.param.") + type + " " + slot + ", " + r(v));
+        }
+    }
+
+    // The PTX calling convention: arguments and the return value go through
+    // .param variables declared in a { } scope around the call.
+    //   { .param .b32 param0; st.param.b32 [param0], %r1;
+    //     .param .b32 retval0; call (retval0), f, (param0); ld.param.b32 %r2, [retval0]; }
+    void call(const Inst* in) {
+        body_ << "\t{\n";
+        std::string args;
+        for (size_t i = 0; i < in->ops.size(); ++i) {
+            std::string p = "param" + std::to_string(i);
+            ins(std::string(".param ") + paramBits(in->ops[i]->type) + " " + p);
+            writeParam("[" + p + "]", in->ops[i]);
+            args += (i ? ", " : "") + p;
+        }
+        std::string target = in->name + (args.empty() ? "" : ", (" + args + ")");
+        if (in->type == IrType::Void) {
+            ins("call " + target);
+        } else {
+            ins(std::string(".param ") + paramBits(in->type) + " retval0");
+            ins("call (retval0), " + target);
+            readParam(r(in), in->type, "[retval0]");
+        }
+        body_ << "\t}\n";
     }
 
     void compare(const Inst* in) {
@@ -251,7 +337,10 @@ private:
                 }
                 break;
             }
-            default: ins("ret"); break;
+            default:  // Ret
+                if (!t->ops.empty()) writeParam("[" + retvalName(fn_) + "]", t->ops[0]);
+                ins("ret");
+                break;
         }
     }
 };
@@ -265,6 +354,25 @@ std::string emitPtx(const IrModule& m, const std::string& arch) {
     out << ".version 8.0\n";
     out << ".target " << arch << "\n";
     out << ".address_size 64\n";
+
+    // PTX needs a function declared before it is called: declare all device
+    // functions up front, so they can call each other in any order.
+    bool any = false;
+    for (const auto& f : m.funcs) {
+        if (f->isKernel) continue;
+        out << (any ? "" : "\n") << signature(*f) << ";\n";
+        any = true;
+    }
+    // Shared arrays: one .shared variable each, visible to the whole module.
+    any = false;
+    for (const auto& f : m.funcs) {
+        for (const SharedArray& a : f->sharedArrays) {
+            out << (any ? "" : "\n") << ".shared .align 4 ." << (a.elem == IrType::F32 ? "f32" : "s32") << " "
+                << a.name << "[" << a.size << "];\n";
+            any = true;
+        }
+    }
+
     for (size_t i = 0; i < m.funcs.size(); ++i) out << "\n" << FunctionEmitter(*m.funcs[i], static_cast<int>(i)).run();
     return out.str();
 }

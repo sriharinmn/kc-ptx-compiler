@@ -1,0 +1,28 @@
+// Sum of an array, one partial sum per block, using shared memory.
+// The classic "tree reduction": in each step, the first half of the threads
+// add the second half's values to their own, until one value is left.
+// barrier() makes every thread wait, so nobody reads a value before it is written.
+// Launch with 256 threads per block.
+kernel block_sum(x: *f32, out: *f32, n: i32) {
+    shared buf: f32[256];
+    let tid = threadIdx.x;
+    let i = blockIdx.x * blockDim.x + tid;
+
+    let v = 0.0;
+    if (i < n) {
+        v = x[i];
+    }
+    buf[tid] = v;
+    barrier();
+
+    for (let s = blockDim.x / 2; s > 0; s = s / 2) {
+        if (tid < s) {
+            buf[tid] += buf[tid + s];
+        }
+        barrier();
+    }
+
+    if (tid == 0) {
+        out[blockIdx.x] = buf[0];
+    }
+}

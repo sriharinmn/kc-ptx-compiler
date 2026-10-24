@@ -81,9 +81,17 @@ const char* opcName(Opc op) {
         case Opc::Ne: return "ne";
         case Opc::CvtI2F: return "i2f";
         case Opc::CvtF2I: return "f2i";
+        case Opc::Min: return "min";
+        case Opc::Max: return "max";
+        case Opc::Abs: return "abs";
+        case Opc::Sqrt: return "sqrt";
         case Opc::ElemAddr: return "elemaddr";
+        case Opc::SharedAddr: return "sharedaddr";
         case Opc::Load: return "load";
         case Opc::Store: return "store";
+        case Opc::AtomicAdd: return "atomic_add";
+        case Opc::Barrier: return "barrier";
+        case Opc::Call: return "call";
         case Opc::Phi: return "phi";
         case Opc::Br: return "br";
         case Opc::CondBr: return "condbr";
@@ -102,7 +110,9 @@ std::string printInst(const Inst* in) {
     os << opcName(in->op);
 
     // Type suffix: what the instruction operates on (like PTX's add.s32).
-    if (in->op == Opc::ElemAddr || in->op == Opc::Load || in->op == Opc::Store)
+    bool memory = in->op == Opc::Load || in->op == Opc::Store || in->op == Opc::AtomicAdd;
+    if (memory && in->shared) os << ".shared";
+    if (memory || in->op == Opc::ElemAddr)
         os << "." << irTypeName(in->memType);
     else if (isCompare(in->op))
         os << "." << irTypeName(in->ops[0]->type);
@@ -123,6 +133,12 @@ std::string printInst(const Inst* in) {
             break;
         case Opc::Param: os << " " << in->name; break;
         case Opc::SReg: os << " %" << in->name; break;
+        case Opc::SharedAddr: os << " " << in->name; break;
+        case Opc::Call:
+            os << " " << in->name << "(";
+            for (size_t i = 0; i < in->ops.size(); ++i) os << (i ? ", " : "") << val(in->ops[i]);
+            os << ")";
+            break;
         case Opc::Phi:
             for (size_t i = 0; i < in->ops.size(); ++i)
                 os << (i ? ", " : " ") << "[bb" << in->parent->preds[i]->id << ": " << val(in->ops[i]) << "]";
@@ -143,7 +159,11 @@ std::string printInst(const Inst* in) {
 std::string printIr(const IrModule& m) {
     std::ostringstream os;
     for (const auto& f : m.funcs) {
-        os << "kernel " << f->name << "\n";
+        os << (f->isKernel ? "kernel " : "fn ") << f->name;
+        if (f->retType != IrType::Void) os << " -> " << irTypeName(f->retType);
+        os << "\n";
+        for (const SharedArray& a : f->sharedArrays)
+            os << "  shared " << a.name << ": " << irTypeName(a.elem) << "[" << a.size << "]\n";
         for (const auto& b : f->blocks) {
             os << "bb" << b->id << ":";
             if (!b->preds.empty()) {

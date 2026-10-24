@@ -1,4 +1,5 @@
-// kc: command-line compiler.  kc input.kc [-o output.ptx] [--arch sm_89] [--emit-ir]
+// kc: command-line compiler.
+//   kc input.kc [-o output.ptx] [--arch sm_89] [--emit-tokens] [--emit-ast] [--emit-ir]
 
 #include <fstream>
 #include <iostream>
@@ -10,10 +11,12 @@
 namespace {
 
 void usage() {
-    std::cerr << "usage: kc <input.kc> [-o output.ptx] [--arch sm_XX] [--emit-ir]\n"
-                 "  -o FILE     write PTX to FILE (default: input name with .ptx; '-' = stdout)\n"
-                 "  --arch A    target GPU architecture (default: sm_89)\n"
-                 "  --emit-ir   also print the SSA IR to stdout\n";
+    std::cerr << "usage: kc <input.kc> [-o output.ptx] [--arch sm_XX] [--emit-tokens] [--emit-ast] [--emit-ir]\n"
+                 "  -o FILE         write PTX to FILE (default: input name with .ptx; '-' = stdout)\n"
+                 "  --arch A        target GPU architecture (default: sm_89)\n"
+                 "  --emit-tokens   also print the tokens to stdout\n"
+                 "  --emit-ast      also print the syntax tree to stdout\n"
+                 "  --emit-ir       also print the SSA IR to stdout\n";
 }
 
 }  // namespace
@@ -21,7 +24,7 @@ void usage() {
 int main(int argc, char** argv) {
     std::string input, output;
     CompileOptions opts;
-    bool emitIr = false;
+    bool emitTokens = false, emitAst = false, emitIr = false;
 
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
@@ -29,6 +32,10 @@ int main(int argc, char** argv) {
             output = argv[++i];
         } else if (a == "--arch" && i + 1 < argc) {
             opts.arch = argv[++i];
+        } else if (a == "--emit-tokens") {
+            emitTokens = true;
+        } else if (a == "--emit-ast") {
+            emitAst = true;
         } else if (a == "--emit-ir") {
             emitIr = true;
         } else if (a == "-h" || a == "--help") {
@@ -62,6 +69,8 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    if (emitTokens) std::cout << result.tokens << "\n";
+    if (emitAst) std::cout << result.ast;
     if (emitIr) std::cout << result.ir;
 
     if (output.empty()) {

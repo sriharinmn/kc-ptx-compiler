@@ -73,31 +73,40 @@ class IrGen {
 public:
     explicit IrGen(IrFunction& fn) : fn_(fn) {}
 
-    void kernel(const Function& k) {
-        fn_.name = k.name;
+    void function(const Function& f) {
+        fn_.name = f.name;
+        fn_.isKernel = f.isKernel;
+        fn_.retType = irType(f.retType);
         entry_ = fn_.newBlock();
         entry_->sealed = true;  // nothing ever jumps to the entry block
         cur_ = entry_;
-        for (size_t i = 0; i < k.params.size(); ++i) {
-            const Var* p = k.params[i];
+        for (size_t i = 0; i < f.params.size(); ++i) {
+            const Var* p = f.params[i];
             Inst* in = emit(Opc::Param, irType(p->type));
             in->paramIndex = static_cast<int>(i);
             in->name = p->name;
             fn_.params.push_back(in);
             writeVar(p, entry_, in);
         }
-        stmts(k.body);
-        if (cur_) emit(Opc::Ret, IrType::Void);
+        stmts(f.body);
+        if (cur_) emit(Opc::Ret, IrType::Void);  // sema guarantees value-returning functions never get here
         fn_.renumber();
     }
 
 private:
+    // Where 'continue' and 'break' jump to, for the innermost loop.
+    struct LoopTargets {
+        Block* continueTo;
+        Block* breakTo;
+    };
+
     IrFunction& fn_;
     Block* entry_ = nullptr;
     Block* cur_ = nullptr;  // block we are adding code to; nullptr after a return (unreachable)
     std::map<const Var*, std::map<Block*, Inst*>> defs_;           // current value of a variable per block
     std::map<Block*, std::map<const Var*, Inst*>> incompletePhis_; // placeholder phis in unsealed blocks
     std::map<IrType, Inst*> undefs_;
+    std::vector<LoopTargets> loops_;
 
     // ---- building instructions ----
     Inst* emit(Opc op, IrType type, std::vector<Inst*> ops = {}) {
@@ -242,19 +251,39 @@ private:
     void stmt(const Stmt& s) {
         switch (s.kind) {
             case StmtKind::Let: writeVar(s.var, cur_, expr(*s.value)); break;
+            case StmtKind::Shared: sharedArray(*s.var); break;
             case StmtKind::Assign: assign(s); break;
+            case StmtKind::ExprStmt: expr(*s.value); break;
             case StmtKind::If: ifStmt(s); break;
             case StmtKind::While: loop(*s.cond, s.body, nullptr); break;
             case StmtKind::For:
                 if (s.init) stmt(*s.init);
                 loop(*s.cond, s.body, s.step.get());
                 break;
+            case StmtKind::Break: branch(loops_.back().breakTo); break;
+            case StmtKind::Continue: branch(loops_.back().continueTo); break;
             case StmtKind::Return:
-                emit(Opc::Ret, IrType::Void);
+                if (s.value)
+                    emit(Opc::Ret, IrType::Void, {expr(*s.value)});
+                else
+                    emit(Opc::Ret, IrType::Void);
                 cur_ = nullptr;
                 break;
             case StmtKind::Block: stmts(s.body); break;
         }
+    }
+
+    // The array's "value" is its address in shared memory.
+    void sharedArray(const Var& v) {
+        std::string name = fn_.name + "_" + v.name;
+        for (int n = 2; std::any_of(fn_.sharedArrays.begin(), fn_.sharedArrays.end(),
+                                    [&](const SharedArray& a) { return a.name == name; });
+             ++n)
+            name = fn_.name + "_" + v.name + std::to_string(n);  // same name used twice in one kernel
+        fn_.sharedArrays.push_back({name, irType(scalar(v.type.base)), v.arraySize});
+        Inst* addr = emit(Opc::SharedAddr, IrType::U64);
+        addr->name = name;
+        writeVar(&v, cur_, addr);
     }
 
     void assign(const Stmt& s) {
@@ -267,13 +296,10 @@ private:
         } else {  // p[i] = value
             Inst* addr = elemAddr(target);
             Inst* value = expr(*s.value);
-            if (s.compound) {
-                Inst* old = emit(Opc::Load, type, {addr});
-                old->memType = type;
-                value = emit(binaryOpc(s.compoundOp), type, {old, value});
-            }
+            if (s.compound) value = emit(binaryOpc(s.compoundOp), type, {load(target, addr), value});
             Inst* st = emit(Opc::Store, IrType::Void, {addr, value});
             st->memType = type;
+            st->shared = target.kids[0]->type.shared;
         }
     }
 
@@ -304,24 +330,41 @@ private:
         }
     }
 
-    //   br header   header: cond; condbr body, exit   body: ...; step; br header   exit: ...
+    //   br header
+    //   header: cond; condbr body, exit
+    //   body:   ...; br step          ('continue' also jumps to step, 'break' to exit)
+    //   step:   i += 1; br header     (a for loop's step; a while loop jumps straight to header)
+    //   exit:   ...
     void loop(const Expr& cond, const std::vector<StmtPtr>& body, const Stmt* step) {
         Block* header = fn_.newBlock();
         branch(header);
-        startBlock(header);  // not sealed yet: the back edge from the body is still missing
+        startBlock(header);  // not sealed yet: the jumps back from the body are still missing
         Inst* c = expr(cond);
         Block* bodyB = fn_.newBlock();
         Block* exit = fn_.newBlock();
+        Block* stepB = step ? fn_.newBlock() : nullptr;
         condBranch(c, bodyB, exit);
         seal(bodyB);
 
+        Block* next = stepB ? stepB : header;
+        loops_.push_back({next, exit});
         startBlock(bodyB);
         stmts(body);
-        if (cur_ && step) stmt(*step);
-        if (cur_) branch(header);  // the back edge
+        if (cur_) branch(next);
+        loops_.pop_back();
 
+        if (stepB) {
+            if (stepB->preds.empty()) {
+                fn_.removeBlock(stepB);  // the body always breaks or returns: the step never runs
+            } else {
+                seal(stepB);
+                startBlock(stepB);
+                stmt(*step);
+                branch(header);
+            }
+        }
         seal(header);  // now all predecessors of the header are known
-        seal(exit);
+        seal(exit);    // ... and of the exit (the loop condition plus every 'break')
         startBlock(exit);
     }
 
@@ -349,12 +392,8 @@ private:
                 in->name = sregName(e.name);
                 return in;
             }
-            case ExprKind::Index: {
-                Inst* addr = elemAddr(e);
-                Inst* ld = emit(Opc::Load, irType(e.type), {addr});
-                ld->memType = ld->type;
-                return ld;
-            }
+            case ExprKind::Index: return load(e, elemAddr(e));
+            case ExprKind::Call: return call(e);
             case ExprKind::Unary: {
                 Inst* v = expr(*e.kids[0]);
                 return emit(e.op == Op::Neg ? Opc::Neg : Opc::Not, irType(e.type), {v});
@@ -380,6 +419,43 @@ private:
         Inst* addr = emit(Opc::ElemAddr, IrType::U64, {base, i});
         addr->memType = irType(scalar(index.kids[0]->type.base));
         return addr;
+    }
+
+    // Load the element 'index' (an Index expression) whose address is 'addr'.
+    Inst* load(const Expr& index, Inst* addr) {
+        Inst* ld = emit(Opc::Load, irType(index.type), {addr});
+        ld->memType = ld->type;
+        ld->shared = index.kids[0]->type.shared;
+        return ld;
+    }
+
+    Inst* call(const Expr& e) {
+        IrType type = irType(e.type);
+        switch (e.builtin) {
+            case BuiltinFn::Sqrt: return emit(Opc::Sqrt, type, {expr(*e.kids[0])});
+            case BuiltinFn::Abs: return emit(Opc::Abs, type, {expr(*e.kids[0])});
+            case BuiltinFn::Min:
+            case BuiltinFn::Max: {
+                Inst* a = expr(*e.kids[0]);
+                Inst* b = expr(*e.kids[1]);
+                return emit(e.builtin == BuiltinFn::Min ? Opc::Min : Opc::Max, type, {a, b});
+            }
+            case BuiltinFn::Barrier: return emit(Opc::Barrier, IrType::Void);
+            case BuiltinFn::AtomicAdd: {
+                const Expr& target = *e.kids[0];
+                Inst* addr = elemAddr(target);
+                Inst* add = emit(Opc::AtomicAdd, type, {addr, expr(*e.kids[1])});
+                add->memType = type;
+                add->shared = target.kids[0]->type.shared;
+                return add;
+            }
+            case BuiltinFn::None: break;
+        }
+        std::vector<Inst*> args;
+        for (const auto& arg : e.kids) args.push_back(expr(*arg));
+        Inst* c = emit(Opc::Call, type, args);
+        c->name = e.callee->name;
+        return c;
     }
 
     // a && b: b is only evaluated if a is true (a || b: only if a is false), as in C.
@@ -410,9 +486,9 @@ private:
 
 IrModule generateIr(const Program& prog) {
     IrModule m;
-    for (const auto& k : prog.kernels) {
+    for (const auto& f : prog.functions) {
         m.funcs.push_back(std::make_unique<IrFunction>());
-        IrGen(*m.funcs.back()).kernel(*k);
+        IrGen(*m.funcs.back()).function(*f);
     }
     return m;
 }

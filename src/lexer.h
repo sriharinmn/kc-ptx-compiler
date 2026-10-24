@@ -11,11 +11,11 @@
 enum class Tok {
     End, Ident, IntLit, FloatLit,
     // keywords
-    KwKernel, KwLet, KwIf, KwElse, KwWhile, KwFor, KwReturn, KwTrue, KwFalse,
-    KwI32, KwF32, KwBool,
+    KwKernel, KwFn, KwLet, KwShared, KwIf, KwElse, KwWhile, KwFor, KwBreak, KwContinue, KwReturn,
+    KwTrue, KwFalse, KwI32, KwF32, KwBool,
     // punctuation and operators
     LParen, RParen, LBrace, RBrace, LBracket, RBracket,
-    Comma, Semi, Colon, Dot,
+    Comma, Semi, Colon, Dot, Arrow,
     Plus, Minus, Star, Slash, Percent,
     Amp, Pipe, Caret, Shl, Shr, Bang, AmpAmp, PipePipe,
     Lt, Le, Gt, Ge, EqEq, NotEq,
@@ -33,3 +33,6 @@ std::vector<Token> lex(const std::string& source);
 
 // Human-readable token name for error messages, e.g. "';'".
 const char* tokName(Tok t);
+
+// One token per line ("3:5  keyword  let"), for --emit-tokens and the playground.
+std::string printTokens(const std::vector<Token>& tokens);

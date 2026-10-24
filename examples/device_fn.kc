@@ -1,0 +1,24 @@
+// Device functions ('fn') are helpers that kernels call on the GPU.
+// They compile to PTX .func, and arguments travel through .param memory.
+
+fn clamp(v: f32, lo: f32, hi: f32) -> f32 {
+    return min(max(v, lo), hi);
+}
+
+fn is_outlier(v: f32) -> bool {
+    return abs(v) > 8.0;
+}
+
+// Brightness/contrast adjustment: y = clamp(gain * x + bias, 0, 1),
+// with outliers replaced by 0.
+kernel adjust(x: *f32, y: *f32, n: i32, gain: f32, bias: f32) {
+    let i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) {
+        return;
+    }
+    if (is_outlier(x[i])) {
+        y[i] = 0.0;
+    } else {
+        y[i] = clamp(gain * x[i] + bias, 0.0, 1.0);
+    }
+}

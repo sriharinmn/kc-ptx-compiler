@@ -29,13 +29,18 @@ enum class Opc {
     Neg, Not,
     Lt, Le, Gt, Ge, Eq, Ne,  // comparisons: result is Pred
     CvtI2F, CvtF2I,          // i32 -> f32, f32 -> i32
-    ElemAddr,  // address of ops[0][ops[1]] (pointer + index * element size)
-    Load,      // value at address ops[0]
-    Store,     // store ops[1] at address ops[0]
-    Phi,       // ops[i] is the value when coming from parent->preds[i]
-    Br,        // jump to targets[0]
-    CondBr,    // if ops[0] jump to targets[0], else to targets[1]
-    Ret,
+    Min, Max, Abs, Sqrt,     // built-in math
+    ElemAddr,   // address of ops[0][ops[1]] (pointer + index * element size)
+    SharedAddr, // address of the shared array called 'name'
+    Load,       // value at address ops[0]
+    Store,      // store ops[1] at address ops[0]
+    AtomicAdd,  // atomically add ops[1] to the value at address ops[0]; result = old value
+    Barrier,    // wait until every thread of the block gets here
+    Call,       // call function 'name' with arguments ops; result = its return value
+    Phi,        // ops[i] is the value when coming from parent->preds[i]
+    Br,         // jump to targets[0]
+    CondBr,     // if ops[0] jump to targets[0], else to targets[1]
+    Ret,        // return (ops[0] = return value, for functions that return one)
 };
 
 struct Block;
@@ -50,9 +55,10 @@ struct Inst {
 
     long long imm = 0;             // Const (i32 and bool)
     float fimm = 0;                // Const (f32)
-    IrType memType = IrType::Void; // ElemAddr / Load / Store: element type in memory
+    IrType memType = IrType::Void; // ElemAddr / Load / Store / AtomicAdd: element type in memory
+    bool shared = false;           // Load / Store / AtomicAdd: shared memory instead of global
     int paramIndex = -1;           // Param
-    std::string name;              // Param name, or SReg name
+    std::string name;              // Param name, SReg name, SharedAddr array, or Call target
 
     // Set when a phi is removed during SSA construction; points to the value that replaced it.
     Inst* replacement = nullptr;
@@ -67,8 +73,18 @@ struct Block {
     Inst* terminator() const;
 };
 
+// A shared-memory array, declared once per kernel in the PTX.
+struct SharedArray {
+    std::string name;  // unique PTX name, e.g. "reduce_buf"
+    IrType elem;
+    int size;
+};
+
 struct IrFunction {
     std::string name;
+    bool isKernel = true;
+    IrType retType = IrType::Void;              // device functions only
+    std::vector<SharedArray> sharedArrays;      // kernels only
     std::vector<Inst*> params;                  // Param instructions, in order
     std::vector<std::unique_ptr<Block>> blocks; // blocks[0] is the entry; order = layout in PTX
     std::vector<std::unique_ptr<Inst>> pool;    // owns every Inst ever created

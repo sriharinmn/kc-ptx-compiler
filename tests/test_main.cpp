@@ -414,6 +414,209 @@ void testNestedLoops(Gpu& gpu) {
     checkInts(dout.download(), want);
 }
 
+void testSharedReduction(Gpu& gpu) {
+    Module m = build(gpu, example("reduce.kc"));
+    const int n = 10000, threads = 256, blocks = blocksFor(n, threads);
+    // Whole numbers, so the sum is exact no matter in which order the GPU adds.
+    std::vector<int> xi = randomInts(n, 14, -10, 10);
+    std::vector<float> x(xi.begin(), xi.end()), want(blocks, 0.0f);
+    for (int i = 0; i < n; ++i) want[i / threads] += x[i];
+    DeviceBuffer<float> dx(x), dout(blocks);
+    int nArg = n;
+    launch(m.kernel("block_sum"), blocks, threads, {dx.arg(), dout.arg(), &nArg});
+    checkFloats(dout.download(), want);
+}
+
+void testHistogram(Gpu& gpu) {
+    Module m = build(gpu, example("histogram.kc"));
+    const int n = 100000;
+    int nbins = 16;
+    std::vector<int> data = randomInts(n, 15, 0, 1000), want(nbins, 0);
+    for (int v : data) want[v % nbins]++;
+    DeviceBuffer<int> dd(data), dbins(nbins);
+    int nArg = n;
+    launch(m.kernel("histogram"), blocksFor(n, 256), 256, {dd.arg(), dbins.arg(), &nArg, &nbins});
+    checkInts(dbins.download(), want);
+}
+
+void testDeviceFunctions(Gpu& gpu) {
+    Module m = build(gpu, example("device_fn.kc"));
+    const int n = 3000;
+    float gain = 0.08f, bias = 0.5f;
+    std::vector<float> x = randomFloats(n, 16), want(n);
+    for (int i = 0; i < n; ++i)
+        want[i] = std::fabs(x[i]) > 8.0f ? 0.0f : std::min(std::max(gain * x[i] + bias, 0.0f), 1.0f);
+    DeviceBuffer<float> dx(x), dy(n);
+    int nArg = n;
+    launch(m.kernel("adjust"), blocksFor(n, 256), 256, {dx.arg(), dy.arg(), &nArg, &gain, &bias});
+    checkFloats(dy.download(), want);
+}
+
+void testRecursion(Gpu& gpu) {
+    Module m = build(gpu, R"(
+        fn fact(k: i32) -> i32 {
+            if (k <= 1) {
+                return 1;
+            }
+            return k * fact(k - 1);
+        }
+        fn gcd(a: i32, b: i32) -> i32 {
+            if (b == 0) {
+                return a;
+            } else {
+                return gcd(b, a % b);
+            }
+        }
+        kernel k(out: *i32, n: i32) {
+            let i = blockIdx.x * blockDim.x + threadIdx.x;
+            if (i < n) {
+                out[2 * i] = fact(i % 13);
+                out[2 * i + 1] = gcd(i * 6, 84);
+            }
+        }
+    )");
+    const int n = 200;
+    std::vector<int> want(2 * n);
+    for (int i = 0; i < n; ++i) {
+        int f = 1;
+        for (int k = 2; k <= i % 13; ++k) f *= k;
+        int a = i * 6, b = 84;
+        while (b) {
+            int t = a % b;
+            a = b;
+            b = t;
+        }
+        want[2 * i] = f;
+        want[2 * i + 1] = a;
+    }
+    DeviceBuffer<int> dout(2 * n);
+    int nArg = n;
+    launch(m.kernel("k"), blocksFor(n, 64), 64, {dout.arg(), &nArg});
+    checkInts(dout.download(), want);
+}
+
+void testBreakContinue(Gpu& gpu) {
+    Module m = build(gpu, R"(
+        // For each row: sum the positive values, skipping negatives (continue),
+        // and stop at the first zero (break).
+        kernel scan(m: *i32, out: *i32, rows: i32, cols: i32) {
+            let r = blockIdx.x * blockDim.x + threadIdx.x;
+            if (r >= rows) {
+                return;
+            }
+            let sum = 0;
+            for (let c = 0; c < cols; c += 1) {
+                let v = m[r * cols + c];
+                if (v == 0) {
+                    break;
+                }
+                if (v < 0) {
+                    continue;
+                }
+                sum += v;
+            }
+            let steps = 0;
+            while (true) {
+                steps += 1;
+                if (steps >= r % 5 + 1) {
+                    break;
+                }
+            }
+            out[r] = sum * 10 + steps;
+        }
+    )");
+    int rows = 500, cols = 20;
+    std::vector<int> mat = randomInts(rows * cols, 17, -3, 9), want(rows);
+    for (int r = 0; r < rows; ++r) {
+        int sum = 0;
+        for (int c = 0; c < cols; ++c) {
+            int v = mat[r * cols + c];
+            if (v == 0) break;
+            if (v < 0) continue;
+            sum += v;
+        }
+        want[r] = sum * 10 + (r % 5 + 1);
+    }
+    DeviceBuffer<int> dm(mat), dout(rows);
+    launch(m.kernel("scan"), blocksFor(rows, 128), 128, {dm.arg(), dout.arg(), &rows, &cols});
+    checkInts(dout.download(), want);
+}
+
+void testMathBuiltins(Gpu& gpu) {
+    Module m = build(gpu, R"(
+        kernel math(x: *f32, a: *i32, outF: *f32, outI: *i32, n: i32) {
+            let i = blockIdx.x * blockDim.x + threadIdx.x;
+            if (i < n) {
+                outF[3 * i] = sqrt(abs(x[i]));
+                outF[3 * i + 1] = min(x[i], 1.5);
+                outF[3 * i + 2] = max(x[i], -2.0);
+                outI[2 * i] = abs(a[i]);
+                outI[2 * i + 1] = min(a[i], 7) + max(a[i], -7);
+            }
+        }
+    )");
+    const int n = 1000;
+    std::vector<float> x = randomFloats(n, 18), wantF(3 * n);
+    std::vector<int> a = randomInts(n, 19, -100, 100), wantI(2 * n);
+    for (int i = 0; i < n; ++i) {
+        wantF[3 * i] = std::sqrt(std::fabs(x[i]));
+        wantF[3 * i + 1] = std::min(x[i], 1.5f);
+        wantF[3 * i + 2] = std::max(x[i], -2.0f);
+        wantI[2 * i] = std::abs(a[i]);
+        wantI[2 * i + 1] = std::min(a[i], 7) + std::max(a[i], -7);
+    }
+    DeviceBuffer<float> dx(x), doutF(3 * n);
+    DeviceBuffer<int> da(a), doutI(2 * n);
+    int nArg = n;
+    launch(m.kernel("math"), blocksFor(n, 256), 256, {dx.arg(), da.arg(), doutF.arg(), doutI.arg(), &nArg});
+    checkFloats(doutF.download(), wantF);
+    checkInts(doutI.download(), wantI);
+}
+
+void testSharedAtomics(Gpu& gpu) {
+    // A faster histogram: each block counts into shared memory first, then adds
+    // its counts to global memory once (fewer slow global atomics).
+    Module m = build(gpu, R"(
+        kernel histogram_shared(data: *i32, bins: *i32, n: i32) {
+            shared local: i32[64];
+            let tid = threadIdx.x;
+            if (tid < 64) {
+                local[tid] = 0;
+            }
+            barrier();
+            let i = blockIdx.x * blockDim.x + tid;
+            if (i < n) {
+                atomic_add(local[data[i] % 64], 1);
+            }
+            barrier();
+            if (tid < 64) {
+                atomic_add(bins[tid], local[tid]);
+            }
+        }
+        kernel total(x: *f32, out: *f32, n: i32) {
+            let i = blockIdx.x * blockDim.x + threadIdx.x;
+            if (i < n) {
+                atomic_add(out[0], x[i]);
+            }
+        }
+    )");
+    const int n = 50000;
+    std::vector<int> data = randomInts(n, 20, 0, 100000), want(64, 0);
+    for (int v : data) want[v % 64]++;
+    DeviceBuffer<int> dd(data), dbins(64);
+    int nArg = n;
+    launch(m.kernel("histogram_shared"), blocksFor(n, 256), 256, {dd.arg(), dbins.arg(), &nArg});
+    checkInts(dbins.download(), want);
+
+    std::vector<int> xi = randomInts(n, 21, -5, 5);  // whole numbers: the sum is exact in any order
+    std::vector<float> x(xi.begin(), xi.end());
+    float sum = 0;
+    for (float v : x) sum += v;
+    DeviceBuffer<float> dx(x), dtotal(1);
+    launch(m.kernel("total"), blocksFor(n, 256), 256, {dx.arg(), dtotal.arg(), &nArg});
+    checkFloats(dtotal.download(), {sum});
+}
+
 void testCompileErrors(Gpu&) {
     expectError("kernel k(n: i32) { let x = 1 + 2.0; }", "must have the same type");
     expectError("kernel k() { y = 1; }", "unknown variable 'y'");
@@ -429,6 +632,21 @@ void testCompileErrors(Gpu&) {
     expectError("kernel k() { let x = 5000000000; }", "too large");
     expectError("kernel k() {}\nkernel k() {}", "defined twice");
     expectError("kernel k() {\n  let a = 1;\n  let b = a + true;\n}", "3:13:");  // line:column
+    // session 2 features
+    expectError("kernel k() { break; }", "'break' can only be used inside a loop");
+    expectError("kernel k() { return 1; }", "kernels cannot return a value");
+    expectError("fn f(x: i32) -> i32 { if (x > 0) { return 1; } }", "must end with 'return <value>;'");
+    expectError("fn f(x: i32) -> i32 { return x; } kernel k() { let a = f(1, 2); }", "takes 1 argument(s), but 2");
+    expectError("fn f(x: i32) -> i32 { return x; } kernel k() { let a = f(1.0); }", "argument 1 of 'f' must be i32");
+    expectError("kernel a() {} kernel b() { a(); }", "kernels are launched from the CPU");
+    expectError("fn f() { shared s: f32[4]; }", "only be declared in kernels");
+    expectError("kernel k() { shared s: f32[20000]; }", "more than 48 KB");
+    expectError("kernel k(p: *i32) { atomic_add(p, 1); }", "must be an array element");
+    expectError("fn f() {} kernel k() { let a = f(); }", "does not return a value");
+    expectError("kernel k(n: i32) { n + 1; }", "only function calls can be used as statements");
+    expectError("kernel k() { let x = nope(1); }", "unknown function 'nope'");
+    expectError("kernel k() { shared s: f32[4]; s = s; }", "cannot assign to shared array");
+    expectError("fn sqrt(x: f32) -> f32 { return x; }", "built-in function");
 }
 
 struct Test {
@@ -451,6 +669,13 @@ const Test kTests[] = {
     {"fibonacci (loop-carried values)", testFibonacci},
     {"collatz (if/else inside while)", testCollatz},
     {"nested loops", testNestedLoops},
+    {"reduce.kc (shared memory + barrier)", testSharedReduction},
+    {"histogram.kc (atomic_add)", testHistogram},
+    {"device_fn.kc (device functions, bool return)", testDeviceFunctions},
+    {"recursive device functions", testRecursion},
+    {"break and continue", testBreakContinue},
+    {"sqrt, abs, min, max", testMathBuiltins},
+    {"atomics on shared memory and on f32", testSharedAtomics},
     {"compile errors are reported", testCompileErrors},
 };
 

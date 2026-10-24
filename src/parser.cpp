@@ -1,16 +1,20 @@
 #include "parser.h"
 
 // Grammar (informal):
-//   program    = kernel*
+//   program    = (kernel | function)*
 //   kernel     = "kernel" NAME "(" [param ("," param)*] ")" block
+//   function   = "fn" NAME "(" [param ("," param)*] ")" ["->" type] block
 //   param      = NAME ":" type
 //   type       = "i32" | "f32" | "bool" | "*" type
 //   block      = "{" statement* "}"
-//   statement  = let ";" | if | while | for | "return" ";" | block | assignment ";"
+//   statement  = let ";" | shared ";" | if | while | for | block
+//              | "break" ";" | "continue" ";" | "return" [expr] ";"
+//              | assignment ";" | call ";"
 //   let        = "let" NAME [":" type] "=" expr
+//   shared     = "shared" NAME ":" ("i32" | "f32") "[" INT "]"
 //   assignment = expr ("=" | "+=" | "-=" | "*=" | "/=") expr
 //   expr       = binary operators with C precedence, then unary - and !,
-//                then postfix p[i], then literals / names / (expr) / i32(e) / f32(e)
+//                then postfix p[i], then literals / names / calls f(a, b) / (expr) / i32(e) / f32(e)
 
 namespace {
 
@@ -63,7 +67,7 @@ public:
 
     Program program() {
         Program prog;
-        while (!check(Tok::End)) prog.kernels.push_back(kernel());
+        while (!check(Tok::End)) prog.functions.push_back(function());
         return prog;
     }
 
@@ -99,10 +103,14 @@ private:
     }
 
     // ---- declarations ----
-    std::unique_ptr<Function> kernel() {
+    std::unique_ptr<Function> function() {
         auto f = std::make_unique<Function>();
         fn_ = f.get();
-        f->loc = expect(Tok::KwKernel).loc;
+        f->loc = peek().loc;
+        if (accept(Tok::KwFn))
+            f->isKernel = false;
+        else if (!accept(Tok::KwKernel))
+            error("expected 'kernel' or 'fn' but found " + describe(peek()));
         f->name = expect(Tok::Ident).text;
         expect(Tok::LParen);
         if (!check(Tok::RParen)) {
@@ -114,6 +122,10 @@ private:
             } while (accept(Tok::Comma));
         }
         expect(Tok::RParen);
+        if (accept(Tok::Arrow)) {
+            if (f->isKernel) error("kernels cannot return a value (they run once per thread, launched from the CPU)");
+            f->retType = type();
+        }
         f->body = block();
         return f;
     }
@@ -161,10 +173,24 @@ private:
                 return s;
             }
             case Tok::KwFor: return forStmt();
-            case Tok::KwReturn: {
+            case Tok::KwShared: {
+                StmtPtr s = shared();
+                expect(Tok::Semi);
+                return s;
+            }
+            case Tok::KwBreak:
+            case Tok::KwContinue: {
+                StmtKind kind = check(Tok::KwBreak) ? StmtKind::Break : StmtKind::Continue;
                 pos_++;
                 expect(Tok::Semi);
-                return makeStmt(StmtKind::Return, loc);
+                return makeStmt(kind, loc);
+            }
+            case Tok::KwReturn: {
+                pos_++;
+                StmtPtr s = makeStmt(StmtKind::Return, loc);
+                if (!check(Tok::Semi)) s->value = expr();
+                expect(Tok::Semi);
+                return s;
             }
             case Tok::LBrace: {
                 StmtPtr s = makeStmt(StmtKind::Block, loc);
@@ -172,11 +198,33 @@ private:
                 return s;
             }
             default: {
-                StmtPtr s = assignment();
+                StmtPtr s = simpleStatement();
                 expect(Tok::Semi);
                 return s;
             }
         }
+    }
+
+    StmtPtr shared() {
+        StmtPtr s = makeStmt(StmtKind::Shared, expect(Tok::KwShared).loc);
+        const Token& name = expect(Tok::Ident);
+        expect(Tok::Colon);
+        Type elem;
+        if (accept(Tok::KwI32))
+            elem = scalar(Base::I32);
+        else if (accept(Tok::KwF32))
+            elem = scalar(Base::F32);
+        else
+            error("shared arrays hold i32 or f32 values, e.g. 'shared buf: f32[256];'");
+        expect(Tok::LBracket);
+        const Token& size = expect(Tok::IntLit);
+        expect(Tok::RBracket);
+        if (size.text.size() > 6) throw CompileError(size.loc, "shared array is too large");
+        elem.ptr = true;
+        elem.shared = true;
+        s->var = newVar(name.text, elem, name.loc);
+        s->var->arraySize = std::stoi(size.text);
+        return s;
     }
 
     StmtPtr let() {
@@ -218,9 +266,25 @@ private:
         return s;
     }
 
+    // An assignment, or a call used as a statement (like barrier();).
+    StmtPtr simpleStatement() {
+        Loc loc = peek().loc;
+        ExprPtr e = expr();
+        if (check(Tok::Semi)) {
+            StmtPtr s = makeStmt(StmtKind::ExprStmt, loc);
+            s->value = std::move(e);
+            return s;
+        }
+        return assignmentRest(std::move(e), loc);
+    }
+
     StmtPtr assignment() {
         Loc loc = peek().loc;
         ExprPtr target = expr();
+        return assignmentRest(std::move(target), loc);
+    }
+
+    StmtPtr assignmentRest(ExprPtr target, Loc loc) {
         StmtPtr s = makeStmt(StmtKind::Assign, loc);
         switch (peek().kind) {
             case Tok::Assign: break;
@@ -334,6 +398,17 @@ private:
                     ExprPtr e = makeExpr(ExprKind::Builtin, t.loc);
                     e->name = t.text + "." + c.text;
                     return e;
+                }
+                if (accept(Tok::LParen)) {  // a call: name(args)
+                    ExprPtr call = makeExpr(ExprKind::Call, t.loc);
+                    call->name = t.text;
+                    if (!check(Tok::RParen)) {
+                        do {
+                            call->kids.push_back(expr());
+                        } while (accept(Tok::Comma));
+                    }
+                    expect(Tok::RParen);
+                    return call;
                 }
                 ExprPtr e = makeExpr(ExprKind::VarRef, t.loc);
                 e->name = t.text;
