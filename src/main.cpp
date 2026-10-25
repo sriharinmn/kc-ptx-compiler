@@ -1,5 +1,5 @@
 // kc: command-line compiler.
-//   kc input.kc [-o output.ptx] [--arch sm_89] [-O0|-O1] [--emit-tokens] [--emit-ast] [--emit-ir] [--passes]
+//   kc input.kc [-o output.ptx] [--arch sm_89] [-O0|-O1] [-lineinfo] [--emit-tokens] [--emit-ast] [--emit-ir] [--passes]
 
 #include <fstream>
 #include <iostream>
@@ -12,10 +12,12 @@
 namespace {
 
 void usage() {
-    std::cerr << "usage: kc <input.kc> [-o output.ptx] [--arch sm_XX] [-O0|-O1] [--emit-tokens] [--emit-ast] [--emit-ir] [--passes]\n"
+    std::cerr << "usage: kc <input.kc> [-o output.ptx] [--arch sm_XX] [-O0|-O1] [-lineinfo] [--emit-tokens] [--emit-ast]"
+                 " [--emit-ir] [--passes]\n"
                  "  -o FILE         write PTX to FILE (default: input name with .ptx; '-' = stdout)\n"
                  "  --arch A        target GPU architecture (default: sm_89)\n"
                  "  -O0, -O1        optimization level (default: -O1)\n"
+                 "  -lineinfo       add source line info (.loc), for debuggers, profilers and compute-sanitizer\n"
                  "  --emit-tokens   also print the tokens to stdout\n"
                  "  --emit-ast      also print the syntax tree to stdout\n"
                  "  --emit-ir       also print the SSA IR (after optimization) to stdout\n"
@@ -35,6 +37,8 @@ int main(int argc, char** argv) {
             output = argv[++i];
         } else if (a == "--arch" && i + 1 < argc) {
             opts.arch = argv[++i];
+        } else if (a == "-lineinfo") {
+            opts.lineInfo = true;
         } else if (a == "-O0" || a == "-O1") {
             opts.optLevel = a[2] - '0';
         } else if (a == "--emit-tokens") {
@@ -68,6 +72,7 @@ int main(int argc, char** argv) {
     std::stringstream source;
     source << in.rdbuf();
 
+    opts.fileName = input;  // line info names the file as it was given
     CompileResult result;
     try {
         result = compile(source.str(), opts);

@@ -8,6 +8,8 @@
 struct CompileOptions {
     std::string arch = "sm_89";  // GPU architecture to target (RTX 40xx = sm_89)
     int optLevel = 1;            // 0 = no optimization, 1 = run the optimizer (src/opt/)
+    bool lineInfo = false;       // write .file/.loc line info into the PTX (like nvcc -lineinfo)
+    std::string fileName = "kernel.kc";  // the source file name that line info refers to
 };
 
 // The output of every stage, as text.

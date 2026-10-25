@@ -67,7 +67,7 @@ struct Inst {
     bool shared = false;           // Load / Store / AtomicAdd: shared memory instead of global
     int paramIndex = -1;           // Param
     std::string name;              // Param name, SReg name, SharedAddr array, or Call target
-    Loc loc;                       // where in the source it came from (set for branches, barriers, warp operations)
+    Loc loc;                       // source position: its statement (branches, barriers, warp ops: the exact expression)
 
     // Set when a phi is removed during SSA construction; points to the value that replaced it.
     Inst* replacement = nullptr;
@@ -92,6 +92,8 @@ struct SharedArray {
 struct IrFunction {
     std::string name;
     bool isKernel = true;
+    bool isExport = false;                      // visible to other modules (.visible .func)
+    bool isExtern = false;                      // defined in another module: no blocks here (.extern .func)
     IrType retType = IrType::Void;              // device functions only
     std::vector<SharedArray> sharedArrays;      // kernels only
     std::vector<Inst*> params;                  // Param instructions, in order

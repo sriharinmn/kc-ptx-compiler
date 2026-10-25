@@ -125,7 +125,8 @@ Inst* findCallToInline(const IrModule& m, const IrFunction& f, const std::set<co
         for (Inst* in : b->insts) {
             if (in->op != Opc::Call) continue;
             const IrFunction* callee = m.find(in->name);
-            if (!recursive.count(callee) && instCount(*callee) <= kMaxInlineSize) return in;
+            // An extern function's body is in another file, so it can't be copied: the call stays.
+            if (!callee->isExtern && !recursive.count(callee) && instCount(*callee) <= kMaxInlineSize) return in;
         }
     }
     return nullptr;
@@ -151,6 +152,7 @@ int inlineCalls(IrModule& m) {
 
 // Device functions are private to the module (.func without .visible), so one
 // that is no longer called (because every call was inlined) can be deleted.
+// Exported functions stay: another module may call them.
 int removeUncalledFunctions(IrModule& m) {
     int removed = 0;
     for (bool again = true; again;) {  // deleting a function can leave its own callees uncalled
@@ -161,7 +163,7 @@ int removeUncalledFunctions(IrModule& m) {
                 for (const Inst* in : b->insts)
                     if (in->op == Opc::Call && in->name != f->name) called.insert(in->name);
         for (auto it = m.funcs.begin(); it != m.funcs.end();) {
-            if (!(*it)->isKernel && !called.count((*it)->name)) {
+            if (!(*it)->isKernel && !(*it)->isExport && !called.count((*it)->name)) {
                 it = m.funcs.erase(it);
                 removed++;
                 again = true;

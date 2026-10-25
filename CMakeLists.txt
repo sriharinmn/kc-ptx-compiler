@@ -45,7 +45,7 @@ target_link_libraries(gpurt PUBLIC CUDA::cuda_driver)
 
 # End-to-end tests: compile .kc programs, run them on the GPU, compare with the CPU.
 add_executable(kc-tests tests/test_main.cpp)
-target_link_libraries(kc-tests PRIVATE kclib gpurt)
+target_link_libraries(kc-tests PRIVATE kclib gpurt ptxc)
 target_compile_definitions(kc-tests PRIVATE KC_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 
 # Benchmark: kc vs nvcc on the same kernels. bench/kernels.cu (CUDA C++) is
@@ -57,9 +57,15 @@ add_custom_command(
   COMMAND ${CUDAToolkit_NVCC_EXECUTABLE} -ptx -arch=sm_89 -o ${NVCC_PTX} ${CMAKE_SOURCE_DIR}/bench/kernels.cu
   DEPENDS bench/kernels.cu
   COMMENT "nvcc: bench/kernels.cu -> PTX")
-add_library(ptxc runtime/ptx_compiler.cpp)
+add_library(ptxc runtime/ptx_compiler.cpp runtime/linker.cpp)
 target_include_directories(ptxc PUBLIC runtime)
-target_link_libraries(ptxc PUBLIC CUDA::nvptxcompiler_static)
+# nvJitLink uses the PTX compiler library itself, so it must come first (static libraries link left to right).
+target_link_libraries(ptxc PUBLIC CUDA::nvJitLink_static CUDA::nvptxcompiler_static)
 add_executable(kc-bench bench/bench_main.cpp ${NVCC_PTX})
 target_link_libraries(kc-bench PRIVATE kclib gpurt ptxc)
 target_compile_definitions(kc-bench PRIVATE KC_SOURCE_DIR="${CMAKE_SOURCE_DIR}" NVCC_PTX="${NVCC_PTX}")
+
+# Small tools: link PTX files into a cubin, and explain what is inside a cubin.
+add_executable(kc-link tools/kc_link.cpp)
+target_link_libraries(kc-link PRIVATE ptxc)
+add_executable(cubin-info tools/cubin_info.cpp)

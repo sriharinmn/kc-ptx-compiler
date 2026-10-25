@@ -3,7 +3,8 @@
 // Grammar (informal):
 //   program    = (kernel | function)*
 //   kernel     = "kernel" NAME "(" [param ("," param)*] ")" block
-//   function   = "fn" NAME "(" [param ("," param)*] ")" ["->" type] block
+//   function   = ["export"] "fn" NAME "(" [param ("," param)*] ")" ["->" type] block
+//              | "extern" "fn" NAME "(" [param ("," param)*] ")" ["->" type] ";"
 //   param      = NAME ":" type
 //   type       = "i32" | "f32" | "bool" | "*" type
 //   block      = "{" statement* "}"
@@ -107,8 +108,14 @@ private:
         auto f = std::make_unique<Function>();
         fn_ = f.get();
         f->loc = peek().loc;
+        // "export fn": other files may call it. "extern fn ...;": it is defined in another file.
+        f->isExport = accept(Tok::KwExport);
+        f->isExtern = !f->isExport && accept(Tok::KwExtern);
         if (accept(Tok::KwFn))
             f->isKernel = false;
+        else if (f->isExport || f->isExtern)
+            error("only device functions can be export or extern ('" + std::string(f->isExport ? "export" : "extern") +
+                  " fn ...'); kernels are always visible");
         else if (!accept(Tok::KwKernel))
             error("expected 'kernel' or 'fn' but found " + describe(peek()));
         f->name = expect(Tok::Ident).text;
@@ -126,7 +133,12 @@ private:
             if (f->isKernel) error("kernels cannot return a value (they run once per thread, launched from the CPU)");
             f->retType = type();
         }
-        f->body = block();
+        if (f->isExtern) {
+            if (check(Tok::LBrace)) error("an extern fn is defined in another file, so it has no body here: end it with ';'");
+            expect(Tok::Semi);
+        } else {
+            f->body = block();
+        }
         return f;
     }
 

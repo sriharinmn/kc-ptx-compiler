@@ -196,6 +196,8 @@
   .c-type { color: var(--ink-soft); }
   .c-phi { background: var(--marker); }
   .c-pass { color: var(--cobalt); font-weight: 500; }
+  /* the source line under the cursor, and the PTX lines it became (from the .loc line info) */
+  .src-hl, .backdrop .cur-line { background: rgba(43, 80, 214, 0.12); display: inline-block; min-width: 100%; }
 
   /* ---- status bar ---- */
   footer {
@@ -299,7 +301,7 @@ const STAGES = {
   ast:    { title: "Syntax tree", desc: "The parser arranges the tokens into a tree; the type checker adds a type to every expression." },
   ir:     { title: "SSA IR", desc: "The compiler's internal form. Every value is assigned once; a phi picks a value where paths meet." },
   opt:    { title: "Optimized IR", desc: "The same IR after the optimizer: calls inlined, constants folded, repeats reused, loop-invariant work moved out of loops, unused code deleted." },
-  ptx:    { title: "PTX", desc: "NVIDIA's GPU assembly language. The GPU driver turns this into machine code for the actual chip." },
+  ptx:    { title: "PTX", desc: "NVIDIA's GPU assembly language. Put the cursor on a line of your kernel to highlight the PTX it became." },
 };
 
 const $ = (id) => document.getElementById(id);
@@ -314,18 +316,39 @@ function recall(key) { try { return localStorage.getItem(key); } catch (e) { ret
 function escapeHtml(s) { return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }
 
 // ---- highlighting for each stage's output ----
+// The PTX comes with line info: ".loc 1 <line> <col>" before the instructions of each
+// source line. Those lines are hidden; instead, the instructions that come from the
+// source line under the cursor get highlighted.
 function highlightPtx(text) {
-  return text.split("\n").map((raw) => {
-    let line = escapeHtml(raw);
-    if (/^\s*\/\//.test(raw)) return `<span class="c-dim">${line}</span>`;
-    if (/^\$\w+:/.test(raw)) return `<span class="c-label">${line}</span>`;
-    if (/^\s*\./.test(raw)) {                       // directives and declarations
-      line = line.replace(/(\.[a-z_]+)/g, '<span class="c-dir">$1</span>');
-      return line.replace(/(%[a-z]+(?:&lt;\d+&gt;)?)/g, '<span class="c-reg">$1</span>');
-    }
-    line = line.replace(/^(\t(?:@!?%\w+ )?)([a-z][\w.]*)/, '$1<span class="c-op">$2</span>');
-    return line.replace(/(%[a-z]+\d*(?:\.[xyz])?)/g, '<span class="c-reg">$1</span>');
-  }).join("\n");
+  const here = caretLine();
+  let from = 0;  // source line of the instructions that follow
+  const shown = [];
+  for (const raw of text.split("\n")) {
+    const loc = /^\t\.loc\s+\d+\s+(\d+)/.exec(raw);
+    if (loc) { from = +loc[1]; continue; }
+    if (/^\.file\s/.test(raw)) continue;
+    const isInstruction = /^\t[@a-z{}]/.test(raw);
+    const html = highlightPtxLine(raw);
+    shown.push(isInstruction && from === here ? `<span class="src-hl">${html}</span>` : html);
+  }
+  return shown.join("\n").replace(/\n{3,}/g, "\n\n");
+}
+
+function highlightPtxLine(raw) {
+  let line = escapeHtml(raw);
+  if (/^\s*\/\//.test(raw)) return `<span class="c-dim">${line}</span>`;
+  if (/^\$\w+:/.test(raw)) return `<span class="c-label">${line}</span>`;
+  if (/^\s*\./.test(raw)) {                       // directives and declarations
+    line = line.replace(/(\.[a-z_]+)/g, '<span class="c-dir">$1</span>');
+    return line.replace(/(%[a-z]+(?:&lt;\d+&gt;)?)/g, '<span class="c-reg">$1</span>');
+  }
+  line = line.replace(/^(\t(?:@!?%\w+ )?)([a-z][\w.]*)/, '$1<span class="c-op">$2</span>');
+  return line.replace(/(%[a-z]+\d*(?:\.[xyz])?)/g, '<span class="c-reg">$1</span>');
+}
+
+// The source line the cursor is on (1-based).
+function caretLine() {
+  return source.value.slice(0, source.selectionStart).split("\n").length;
 }
 
 function highlightIr(text) {
@@ -433,7 +456,12 @@ function renderEditor(r) {
     const cls = i + 1 === bad ? ' class="bad"' : warned.has(i + 1) ? ' class="warned"' : "";
     return `<div${cls}>${i + 1}</div>`;
   }).join("");
-  backdrop.innerHTML = lines.map((l, i) => (i + 1 === bad ? `<span class="err-line">${escapeHtml(l) || " "}</span>` : escapeHtml(l))).join("\n") + "\n";
+  const here = selected === "ptx" && document.activeElement === source ? caretLine() : 0;
+  backdrop.innerHTML = lines.map((l, i) => {
+    if (i + 1 === bad) return `<span class="err-line">${escapeHtml(l) || " "}</span>`;
+    if (i + 1 === here) return `<span class="cur-line">${escapeHtml(l) || " "}</span>`;
+    return escapeHtml(l);
+  }).join("\n") + "\n";
   syncScroll();
 }
 
@@ -524,6 +552,17 @@ $("arch").addEventListener("change", compileNow);
 $("opt").addEventListener("change", () => { store("kc-opt", $("opt").value); compileNow(); });
 source.addEventListener("input", () => { exampleSelect.value = ""; scheduleCompile(); });
 source.addEventListener("scroll", syncScroll);
+// Moving the cursor to another line re-highlights the PTX that line became.
+let shownLine = 0;
+document.addEventListener("selectionchange", () => {
+  if (document.activeElement !== source || !last || caretLine() === shownLine) return;
+  shownLine = caretLine();
+  renderEditor(last);
+  if (selected !== "ptx") return;
+  renderOutput(last);
+  const first = output.querySelector(".src-hl");
+  if (first) first.scrollIntoView({ block: "nearest" });
+});
 source.addEventListener("keydown", (e) => {
   if (e.key === "Tab" && !e.shiftKey && !e.ctrlKey && !e.metaKey) {  // indent with 4 spaces
     e.preventDefault();
@@ -563,7 +602,11 @@ if (params.get("code")) {  // ?code=... opens any program from a link
 }
 renderEditor(null);
 
-createKc().then((m) => { kc = m; compileNow(); }).catch((e) => {
+createKc().then((m) => {
+  kc = m;
+  compileNow();
+  if (params.get("line")) jumpTo(+params.get("line"), 1);  // ?line=N: start with the cursor on line N
+}).catch((e) => {
   $("status").className = "error";
   $("status").textContent = "The compiler failed to load: " + e;
 });

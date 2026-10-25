@@ -9,4 +9,6 @@
 
 #include "ir.h"
 
-std::string emitPtx(const IrModule& m, const std::string& arch);
+// sourceFile: if not empty, the PTX gets line info (.file and .loc), so tools such as
+// cuobjdump, compute-sanitizer and debuggers can name the kc source line.
+std::string emitPtx(const IrModule& m, const std::string& arch, const std::string& sourceFile = "");

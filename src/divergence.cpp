@@ -90,6 +90,7 @@ DivergenceInfo analyzeDivergence(const IrFunction& f) {
 std::vector<std::string> divergenceWarnings(const IrModule& m) {
     std::vector<std::string> warnings;
     for (const auto& f : m.funcs) {
+        if (f->isExtern) continue;
         DivergenceInfo info = analyzeDivergence(*f);
         for (const auto& b : f->blocks) {
             auto it = info.partial.find(b.get());

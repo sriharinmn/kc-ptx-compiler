@@ -42,6 +42,8 @@ extern "C" EMSCRIPTEN_KEEPALIVE const char* kc_explore(const char* source, const
     CompileOptions opts;
     opts.arch = arch;
     opts.optLevel = optLevel;
+    opts.lineInfo = true;  // the page uses the .loc lines to link source lines to PTX lines
+    opts.fileName = "playground.kc";
     ExploreResult r = explore(source, opts);
     json = "{\"tokens\":" + jsonString(r.stages.tokens) + ",\"ast\":" + jsonString(r.stages.ast) +
            ",\"ir\":" + jsonString(r.stages.ir) + ",\"opt\":" + jsonString(r.stages.optIr) +

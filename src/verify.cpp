@@ -168,6 +168,7 @@ void verifyFunction(const IrFunction& f, const std::string& afterPass) { Verifie
 
 void verifyModule(const IrModule& m, const std::string& afterPass) {
     for (const auto& f : m.funcs) {
+        if (f->isExtern) continue;  // only a declaration
         verifyFunction(*f, afterPass);
         // Every call must match the function it calls.
         for (const auto& b : f->blocks) {

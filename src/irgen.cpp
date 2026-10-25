@@ -76,18 +76,24 @@ public:
     void function(const Function& f) {
         fn_.name = f.name;
         fn_.isKernel = f.isKernel;
+        fn_.isExport = f.isExport;
+        fn_.isExtern = f.isExtern;
         fn_.retType = irType(f.retType);
-        entry_ = fn_.newBlock();
-        entry_->sealed = true;  // nothing ever jumps to the entry block
-        cur_ = entry_;
+        loc_ = f.loc;
+        if (!f.isExtern) {
+            entry_ = fn_.newBlock();
+            entry_->sealed = true;  // nothing ever jumps to the entry block
+            cur_ = entry_;
+        }
         for (size_t i = 0; i < f.params.size(); ++i) {
             const Var* p = f.params[i];
-            Inst* in = emit(Opc::Param, irType(p->type));
+            Inst* in = f.isExtern ? fn_.newInst(Opc::Param, irType(p->type)) : emit(Opc::Param, irType(p->type));
             in->paramIndex = static_cast<int>(i);
             in->name = p->name;
             fn_.params.push_back(in);
-            writeVar(p, entry_, in);
+            if (!f.isExtern) writeVar(p, entry_, in);
         }
+        if (f.isExtern) return;  // only the signature: the body is in another file
         stmts(f.body);
         if (cur_) emit(Opc::Ret, IrType::Void);  // sema guarantees value-returning functions never get here
         fn_.renumber();
@@ -107,12 +113,14 @@ private:
     std::map<Block*, std::map<const Var*, Inst*>> incompletePhis_; // placeholder phis in unsealed blocks
     std::map<IrType, Inst*> undefs_;
     std::vector<LoopTargets> loops_;
+    Loc loc_;  // source position of the statement being translated (for .loc line info)
 
     // ---- building instructions ----
     Inst* emit(Opc op, IrType type, std::vector<Inst*> ops = {}) {
         Inst* in = fn_.newInst(op, type);
         in->ops = std::move(ops);
         in->parent = cur_;
+        in->loc = loc_;  // line info: the statement this instruction comes from
         cur_->insts.push_back(in);
         return in;
     }
@@ -250,6 +258,7 @@ private:
     }
 
     void stmt(const Stmt& s) {
+        loc_ = s.loc;
         switch (s.kind) {
             case StmtKind::Let: writeVar(s.var, cur_, expr(*s.value)); break;
             case StmtKind::Shared: sharedArray(*s.var); break;

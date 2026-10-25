@@ -63,6 +63,7 @@ std::string optimize(IrModule& m, int level) {
     };
     int unrolled = 0;
     for (const auto& f : m.funcs) {
+        if (f->isExtern) continue;  // defined in another module: nothing to optimize here
         rounds(*f);
         // Unrolling comes after the first rounds, so loops are already clean (invariants
         // moved out), and the copies it makes get cleaned up by one more set of rounds.

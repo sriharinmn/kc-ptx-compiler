@@ -177,6 +177,7 @@ Inst* insertBefore(IrFunction& f, Inst* at, Opc op, IrType type, std::vector<Ins
     Inst* in = f.newInst(op, type);
     in->ops = std::move(ops);
     in->parent = at->parent;
+    in->loc = at->loc;  // same source line as the code it replaces
     auto& insts = at->parent->insts;
     insts.insert(std::find(insts.begin(), insts.end(), at), in);
     return in;

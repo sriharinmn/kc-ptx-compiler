@@ -233,7 +233,7 @@ std::string printInst(const Inst* in) {
 std::string printIr(const IrModule& m) {
     std::ostringstream os;
     for (const auto& f : m.funcs) {
-        os << (f->isKernel ? "kernel " : "fn ") << f->name;
+        os << (f->isKernel ? "kernel " : f->isExtern ? "extern fn " : f->isExport ? "export fn " : "fn ") << f->name;
         if (f->retType != IrType::Void) os << " -> " << irTypeName(f->retType);
         os << "\n";
         for (const SharedArray& a : f->sharedArrays)

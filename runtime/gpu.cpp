@@ -39,17 +39,18 @@ Module::Module(const std::string& ptx) {
     // Ask the JIT for its logs. The info log (with LOG_VERBOSE) reports registers used per kernel.
     char infoLog[8192] = {};
     char errorLog[8192] = {};
+    // GENERATE_LINE_INFO keeps the PTX's .loc line info in the machine code (for compute-sanitizer etc.).
     CUjit_option options[] = {
         CU_JIT_INFO_LOG_BUFFER,  CU_JIT_INFO_LOG_BUFFER_SIZE_BYTES,
         CU_JIT_ERROR_LOG_BUFFER, CU_JIT_ERROR_LOG_BUFFER_SIZE_BYTES,
-        CU_JIT_LOG_VERBOSE,
+        CU_JIT_LOG_VERBOSE,      CU_JIT_GENERATE_LINE_INFO,
     };
     void* values[] = {
         infoLog,  reinterpret_cast<void*>(static_cast<uintptr_t>(sizeof infoLog)),
         errorLog, reinterpret_cast<void*>(static_cast<uintptr_t>(sizeof errorLog)),
-        reinterpret_cast<void*>(static_cast<uintptr_t>(1)),
+        reinterpret_cast<void*>(static_cast<uintptr_t>(1)), reinterpret_cast<void*>(static_cast<uintptr_t>(1)),
     };
-    CUresult r = cuModuleLoadDataEx(&mod_, ptx.c_str(), 5, options, values);
+    CUresult r = cuModuleLoadDataEx(&mod_, ptx.c_str(), 6, options, values);
     log_ = infoLog;
     if (r != CUDA_SUCCESS) {
         const char* name = nullptr;

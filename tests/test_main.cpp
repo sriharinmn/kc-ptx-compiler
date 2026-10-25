@@ -19,6 +19,7 @@
 #include "diag.h"
 #include "gpu.h"
 #include "ir.h"
+#include "linker.h"
 #include "verify.h"
 
 namespace {
@@ -154,8 +155,7 @@ void testSaxpy(Gpu& gpu) {
     checkFloats(dy.download(), want);
 }
 
-void testRelu(Gpu& gpu) {
-    Module m = build(gpu, example("relu.kc"));
+void runRelu(Module& m) {
     const int n = 1000;
     std::vector<float> x = randomFloats(n, 5), want(n);
     for (int i = 0; i < n; ++i) want[i] = x[i] < 0 ? 0 : x[i];
@@ -163,6 +163,29 @@ void testRelu(Gpu& gpu) {
     int nArg = n;
     launch(m.kernel("relu"), blocksFor(n, 128), 128, {dx.arg(), dy.arg(), &nArg});
     checkFloats(dy.download(), want);
+}
+
+void testRelu(Gpu& gpu) {
+    Module m = build(gpu, example("relu.kc"));
+    runRelu(m);
+}
+
+// -lineinfo: .file/.loc directives tie each PTX instruction to its kc source line,
+// so cuobjdump, compute-sanitizer and debuggers can name the line.
+void testLineInfo(Gpu& gpu) {
+    CompileOptions opts;
+    opts.arch = gpu.arch();
+    opts.optLevel = gOptLevel;
+    opts.lineInfo = true;
+    opts.fileName = "relu.kc";
+    std::string ptx = compile(example("relu.kc"), opts).ptx;
+    CHECK(countOf(ptx, ".file 1 \"relu.kc\"") == 1);
+    // The load of x[i] comes from line 9, "let v = x[i];": it follows ".loc 1 9", before the next .loc.
+    size_t line9 = ptx.find("\t.loc 1 9 "), load = ptx.find("ld.global.f32");
+    CHECK(line9 != std::string::npos && line9 < load && ptx.find("\t.loc", line9 + 1) > load);
+    CHECK(countOf(compile(example("relu.kc")).ptx, ".loc") == 0);  // off by default, like nvcc
+    Module m(ptx);  // the driver accepts it and keeps the line info
+    runRelu(m);
 }
 
 void testRowSum(Gpu& gpu) {
@@ -800,6 +823,55 @@ void testConstantFolding(Gpu& gpu) {
                               std::to_string(wantF[i]) + " (compared bit for bit)");
 }
 
+// Separate compilation: two files compiled on their own, then linked with nvJitLink.
+void testSeparateCompilation(Gpu& gpu) {
+    const char* lib = R"(
+        // lib.kc: helpers that other files may call
+        export fn clamp01(v: f32) -> f32 {
+            return min(max(v, 0.0), 1.0);
+        }
+        export fn square(v: f32) -> f32 {
+            return v * v;
+        }
+    )";
+    const char* user = R"(
+        // main.kc: uses the helpers, which live in lib.kc
+        extern fn clamp01(v: f32) -> f32;
+        extern fn square(v: f32) -> f32;
+        kernel brighten(x: *f32, y: *f32, n: i32) {
+            let i = blockIdx.x * blockDim.x + threadIdx.x;
+            if (i < n) {
+                y[i] = clamp01(square(x[i]) * 0.02);
+            }
+        }
+    )";
+    CompileOptions opts;
+    opts.arch = gpu.arch();
+    opts.optLevel = gOptLevel;
+    std::string libPtx = compile(lib, opts).ptx, userPtx = compile(user, opts).ptx;
+    CHECK(countOf(userPtx, ".extern .func") == 2);
+    CHECK(countOf(libPtx, ".visible .func") == 4);  // declaration + definition of each, kept even if uncalled
+    CHECK(countOf(userPtx, "call") == 2);           // the bodies are in another file: no inlining
+
+    Module m(linkPtx({{"lib.kc", libPtx}, {"main.kc", userPtx}}, gpu.arch()));
+    const int n = 1000;
+    std::vector<float> x = randomFloats(n, 28), want(n);
+    for (int i = 0; i < n; ++i) want[i] = std::min(std::max(x[i] * x[i] * 0.02f, 0.0f), 1.0f);
+    DeviceBuffer<float> dx(x), dy(n);
+    int nArg = n;
+    launch(m.kernel("brighten"), blocksFor(n, 256), 256, {dx.arg(), dy.arg(), &nArg});
+    checkFloats(dy.download(), want);
+
+    // Without lib.kc, the linker cannot resolve the calls, and says which function is missing.
+    try {
+        linkPtx({{"main.kc", userPtx}}, gpu.arch());
+    } catch (const std::runtime_error& e) {
+        CHECK(std::string(e.what()).find("clamp01") != std::string::npos);
+        return;
+    }
+    throw TestFailure("linking without lib.kc should fail");
+}
+
 // At -O1, x / 2^k and x % 2^k become shifts and masks (ptxas would emit a whole
 // division routine). Negative x needs a correction so it still rounds toward zero.
 void testDivisionByPowersOfTwo(Gpu& gpu) {
@@ -1016,6 +1088,9 @@ void testCompileErrors(Gpu&) {
     expectError("kernel k() { let b = ballot(1); }", "ballot needs a bool");
     expectError("kernel k() { let v = shfl_down(1.0, 2.0); }", "an i32 lane offset");
     expectError("kernel k() { let c = popc(1.5); }", "popc needs an i32");
+    // session 5: separate compilation
+    expectError("extern fn f(x: i32) -> i32 { return x; }", "no body here");
+    expectError("export kernel k() {}", "only device functions can be export or extern");
 }
 
 struct Test {
@@ -1028,6 +1103,7 @@ const Test kTests[] = {
     {"vector_add.kc", testVectorAdd},
     {"saxpy.kc", testSaxpy},
     {"relu.kc (early return, if)", testRelu},
+    {"line info (-lineinfo): .file/.loc in the PTX", testLineInfo},
     {"row_sum.kc (for loop)", testRowSum},
     {"grid_stride.kc (grid-stride loop)", testGridStride},
     {"matmul.kc (naive matrix multiply)", testMatmul},
@@ -1043,6 +1119,7 @@ const Test kTests[] = {
     {"device_fn.kc (device functions, bool return)", testDeviceFunctions},
     {"recursive device functions", testRecursion},
     {"inlining: loops, several returns, calls in conditions", testInliningCases},
+    {"separate compilation: extern/export fn, linked with nvJitLink", testSeparateCompilation},
     {"break and continue", testBreakContinue},
     {"sqrt, abs, min, max", testMathBuiltins},
     {"atomics on shared memory and on f32", testSharedAtomics},

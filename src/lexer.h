@@ -11,7 +11,7 @@
 enum class Tok {
     End, Ident, IntLit, FloatLit,
     // keywords
-    KwKernel, KwFn, KwLet, KwShared, KwIf, KwElse, KwWhile, KwFor, KwBreak, KwContinue, KwReturn,
+    KwKernel, KwFn, KwExtern, KwExport, KwLet, KwShared, KwIf, KwElse, KwWhile, KwFor, KwBreak, KwContinue, KwReturn,
     KwTrue, KwFalse, KwI32, KwF32, KwBool,
     // punctuation and operators
     LParen, RParen, LBrace, RBrace, LBracket, RBracket,

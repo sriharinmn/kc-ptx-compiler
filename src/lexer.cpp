@@ -12,7 +12,7 @@ const std::unordered_map<std::string, Tok> kKeywords = {
     {"while", Tok::KwWhile},   {"for", Tok::KwFor},         {"break", Tok::KwBreak},
     {"continue", Tok::KwContinue}, {"return", Tok::KwReturn}, {"true", Tok::KwTrue},
     {"false", Tok::KwFalse},   {"i32", Tok::KwI32},         {"f32", Tok::KwF32},
-    {"bool", Tok::KwBool},
+    {"bool", Tok::KwBool},     {"extern", Tok::KwExtern},   {"export", Tok::KwExport},
 };
 
 bool isDigit(char c) { return c >= '0' && c <= '9'; }
@@ -196,6 +196,8 @@ const char* tokName(Tok t) {
         case Tok::FloatLit: return "a float";
         case Tok::KwKernel: return "'kernel'";
         case Tok::KwFn: return "'fn'";
+        case Tok::KwExtern: return "'extern'";
+        case Tok::KwExport: return "'export'";
         case Tok::KwLet: return "'let'";
         case Tok::KwShared: return "'shared'";
         case Tok::KwIf: return "'if'";

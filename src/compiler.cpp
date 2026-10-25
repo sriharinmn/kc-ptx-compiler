@@ -31,7 +31,7 @@ void runPipeline(const std::string& source, const CompileOptions& opts, CompileR
         r.passes = optimize(ir, opts.optLevel);
         r.optIr = printIr(ir);
     }
-    r.ptx = emitPtx(ir, opts.arch);
+    r.ptx = emitPtx(ir, opts.arch, opts.lineInfo ? opts.fileName : "");
 }
 
 }  // namespace

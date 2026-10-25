@@ -76,6 +76,7 @@ private:
                 throw CompileError(p->loc, "kernel parameters must be i32, f32 or a pointer");
             declare(p);
         }
+        if (f.isExtern) return;  // only a declaration: the body is in another file
         stmts(f.body);  // same scope as the parameters, so 'let n' cannot hide parameter 'n'
         if (f.retType.base != Base::Void && !alwaysReturns(f.body))
             throw CompileError(f.loc, "function '" + f.name + "' must end with 'return <value>;' on every path");

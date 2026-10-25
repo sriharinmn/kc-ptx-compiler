@@ -68,9 +68,15 @@ threads (e.g. after an early `return`), and marks uniform branches `bra.uni`.
 of two as shifts, CSE over the dominator tree, loop-invariant code motion, dead code
 elimination and 4x loop unrolling, with an IR verifier after every pass.
 
-**Testing:** 31 end-to-end tests run on the GPU at both `-O0` and `-O1` and compare every
+**Debug info, linking, object files:** `-lineinfo` writes `.loc` line info, so
+`nvdisasm` and compute-sanitizer name kc source lines (an out-of-bounds write is reported
+"in oob.kc:5"). `export fn` / `extern fn` give separate compilation, linked with **nvJitLink**
+(`kc-link`). `cubin-info` reads a cubin's ELF sections, symbols, register counts and
+relocations, and shows the cost of separate compilation (24 registers instead of 10, no inlining).
+
+**Testing:** 33 end-to-end tests run on the GPU at both `-O0` and `-O1` and compare every
 result with a CPU reference (warp operations are tested for both sm_89 and sm_75 code);
-examples are checked with `ptxas`; compute-sanitizer memcheck and racecheck are clean.
+examples are checked with `ptxas` and `cubin-info`; compute-sanitizer memcheck and racecheck are clean.
 
 ## Build and test (WSL2 / Linux, CUDA 12+)
 
@@ -82,5 +88,8 @@ bash test.sh            # builds, runs the GPU tests, checks PTX with ptxas, run
 ~/kc-build/kc examples/device_fn.kc --passes -o /dev/null    # what each optimizer pass changed
 ~/kc-build/kc examples/warp_reduce.kc --arch sm_75 -o -      # warp_sum as shuffles for older GPUs
 python3 tools/measure.py                                     # PTX / SASS sizes, -O0 vs -O1 vs nvcc
+~/kc-build/kc examples/relu.kc -lineinfo -o relu.ptx         # PTX with source line info
+~/kc-build/kc-link lib.ptx main.ptx -o program.cubin         # link separately compiled files
+~/kc-build/cubin-info program.cubin                          # what is inside a cubin
 bash web/build.sh       # rebuild the playground (needs Emscripten), then open web/index.html
 ```

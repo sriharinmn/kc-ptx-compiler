@@ -129,6 +129,8 @@ struct Function {
     std::string name;
     Loc loc;
     bool isKernel = true;
+    bool isExport = false;  // "export fn": callable from other files (separate compilation)
+    bool isExtern = false;  // "extern fn ...;": defined in another file, no body here
     Type retType;  // Void for kernels and for functions without '-> type'
     std::vector<Var*> params;
     std::vector<StmtPtr> body;

@@ -11,14 +11,18 @@ BUILD="${KC_BUILD_DIR:-$HOME/kc-build}"
 echo
 "$BUILD/kc-tests" "$@"
 
+# Every example must assemble with ptxas. cubin-info then reads the register
+# count back out of the cubin's ELF sections; it must agree with ptxas -v.
 echo
-echo "ptxas check of examples/ (registers each kernel needs on sm_89):"
+echo "ptxas check of examples/ (registers per thread on sm_89, from ptxas -v and from cubin-info):"
 mkdir -p "$BUILD/examples"
 for f in "$SRC"/examples/*.kc; do
-  out="$BUILD/examples/$(basename "${f%.kc}").ptx"
-  "$BUILD/kc" "$f" -o "$out"
-  regs=$(ptxas -arch=sm_89 -v "$out" -o /dev/null 2>&1 | grep -o "Used [0-9]* registers" | head -1)
-  printf "  %-18s %s\n" "$(basename "$f")" "$regs"
+  out="$BUILD/examples/$(basename "${f%.kc}")"
+  "$BUILD/kc" "$f" -o "$out.ptx"
+  fromPtxas=$(ptxas -arch=sm_89 -v "$out.ptx" -o "$out.cubin" 2>&1 | grep -o "Used [0-9]* registers" | tail -1 | grep -o "[0-9]*")
+  fromElf=$("$BUILD/cubin-info" "$out.cubin" | grep "kernel" | grep -o "[0-9]* registers" | grep -o "[0-9]*")
+  printf "  %-18s %2s registers (cubin-info: %s)\n" "$(basename "$f")" "$fromPtxas" "$fromElf"
+  [ "$fromPtxas" = "$fromElf" ] || { echo "  cubin-info disagrees with ptxas"; exit 1; }
 done
 
 # compute-sanitizer re-runs the tests while watching every memory access the
