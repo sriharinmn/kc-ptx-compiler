@@ -55,6 +55,7 @@ STYLES = {
     "body": BODY,
     "question": ParagraphStyle("question", parent=BODY, fontName="Sans-Bold", spaceBefore=6, spaceAfter=2),
     "bullet": ParagraphStyle("bullet", parent=BODY, leftIndent=16, bulletIndent=4, spaceAfter=3),
+    "subbullet": ParagraphStyle("subbullet", parent=BODY, leftIndent=32, bulletIndent=20, spaceAfter=2),
     "callout": ParagraphStyle("callout", parent=BODY, fontSize=10.5, leading=15.5, backColor=CALLOUT_BG,
                               borderPadding=(9, 10, 9, 10), borderColor=ACCENT, borderWidth=0,
                               leftIndent=10, rightIndent=10, spaceBefore=8, spaceAfter=14),
@@ -190,14 +191,17 @@ def parse(md: str, width: float) -> list:
             continue
         elif re.match(r"^(- |\d+\. )", stripped):
             flush()
+            nested = line.startswith("  ")  # an indented item belongs to the item above it
             m = re.match(r"^(- |(\d+)\. )(.*)", stripped)
             bullet = "•" if m.group(1) == "- " else m.group(2) + "."
             item = [m.group(3)]
-            # continuation lines of the same item are indented
-            while i + 1 < len(lines) and lines[i + 1].startswith("  ") and lines[i + 1].strip():
+            # continuation lines of the same item are indented (but are not items themselves)
+            while (i + 1 < len(lines) and lines[i + 1].startswith("  ") and lines[i + 1].strip()
+                   and not re.match(r"^(- |\d+\. )", lines[i + 1].strip())):
                 i += 1
                 item.append(lines[i].strip())
-            story.append(Paragraph(inline(" ".join(item)), STYLES["bullet"], bulletText=bullet))
+            style = STYLES["subbullet"] if nested else STYLES["bullet"]
+            story.append(Paragraph(inline(" ".join(item)), style, bulletText=bullet))
         elif re.fullmatch(r"\*\*.+\*\*", stripped):  # a line that is all bold: a question / label
             flush()
             story.append(Paragraph(inline(stripped), STYLES["question"]))

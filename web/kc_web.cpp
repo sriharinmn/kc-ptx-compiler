@@ -36,15 +36,16 @@ std::string jsonString(const std::string& s) {
 }  // namespace
 
 // Compiles 'source' and returns every stage as JSON:
-// {"tokens": ..., "ast": ..., "ir": ..., "ptx": ..., "error": ..., "line": N, "col": N}
-extern "C" EMSCRIPTEN_KEEPALIVE const char* kc_explore(const char* source, const char* arch) {
+// {"tokens", "ast", "ir", "opt" (optimized IR), "passes", "ptx", "error", "line", "col"}
+extern "C" EMSCRIPTEN_KEEPALIVE const char* kc_explore(const char* source, const char* arch, int optLevel) {
     static std::string json;  // stays alive until the next call, so JavaScript can read it
     CompileOptions opts;
     opts.arch = arch;
+    opts.optLevel = optLevel;
     ExploreResult r = explore(source, opts);
     json = "{\"tokens\":" + jsonString(r.stages.tokens) + ",\"ast\":" + jsonString(r.stages.ast) +
-           ",\"ir\":" + jsonString(r.stages.ir) + ",\"ptx\":" + jsonString(r.stages.ptx) +
-           ",\"error\":" + jsonString(r.error) + ",\"line\":" + std::to_string(r.errorLine) +
-           ",\"col\":" + std::to_string(r.errorCol) + "}";
+           ",\"ir\":" + jsonString(r.stages.ir) + ",\"opt\":" + jsonString(r.stages.optIr) +
+           ",\"passes\":" + jsonString(r.stages.passes) + ",\"ptx\":" + jsonString(r.stages.ptx) + ",\"error\":" + jsonString(r.error) +
+           ",\"line\":" + std::to_string(r.errorLine) + ",\"col\":" + std::to_string(r.errorCol) + "}";
     return json.c_str();
 }

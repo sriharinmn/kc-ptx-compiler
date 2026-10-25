@@ -1,5 +1,5 @@
 // kc: command-line compiler.
-//   kc input.kc [-o output.ptx] [--arch sm_89] [--emit-tokens] [--emit-ast] [--emit-ir]
+//   kc input.kc [-o output.ptx] [--arch sm_89] [-O0|-O1] [--emit-tokens] [--emit-ast] [--emit-ir] [--passes]
 
 #include <fstream>
 #include <iostream>
@@ -7,16 +7,19 @@
 
 #include "compiler.h"
 #include "diag.h"
+#include "verify.h"
 
 namespace {
 
 void usage() {
-    std::cerr << "usage: kc <input.kc> [-o output.ptx] [--arch sm_XX] [--emit-tokens] [--emit-ast] [--emit-ir]\n"
+    std::cerr << "usage: kc <input.kc> [-o output.ptx] [--arch sm_XX] [-O0|-O1] [--emit-tokens] [--emit-ast] [--emit-ir] [--passes]\n"
                  "  -o FILE         write PTX to FILE (default: input name with .ptx; '-' = stdout)\n"
                  "  --arch A        target GPU architecture (default: sm_89)\n"
+                 "  -O0, -O1        optimization level (default: -O1)\n"
                  "  --emit-tokens   also print the tokens to stdout\n"
                  "  --emit-ast      also print the syntax tree to stdout\n"
-                 "  --emit-ir       also print the SSA IR to stdout\n";
+                 "  --emit-ir       also print the SSA IR (after optimization) to stdout\n"
+                 "  --passes        also print what each optimizer pass changed\n";
 }
 
 }  // namespace
@@ -24,7 +27,7 @@ void usage() {
 int main(int argc, char** argv) {
     std::string input, output;
     CompileOptions opts;
-    bool emitTokens = false, emitAst = false, emitIr = false;
+    bool emitTokens = false, emitAst = false, emitIr = false, showPasses = false;
 
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
@@ -32,12 +35,16 @@ int main(int argc, char** argv) {
             output = argv[++i];
         } else if (a == "--arch" && i + 1 < argc) {
             opts.arch = argv[++i];
+        } else if (a == "-O0" || a == "-O1") {
+            opts.optLevel = a[2] - '0';
         } else if (a == "--emit-tokens") {
             emitTokens = true;
         } else if (a == "--emit-ast") {
             emitAst = true;
         } else if (a == "--emit-ir") {
             emitIr = true;
+        } else if (a == "--passes") {
+            showPasses = true;
         } else if (a == "-h" || a == "--help") {
             usage();
             return 0;
@@ -67,11 +74,15 @@ int main(int argc, char** argv) {
     } catch (const CompileError& e) {
         std::cerr << input << ":" << e.what() << "\n";
         return 1;
+    } catch (const InternalError& e) {
+        std::cerr << input << ": " << e.what() << "\n";
+        return 3;
     }
 
     if (emitTokens) std::cout << result.tokens << "\n";
     if (emitAst) std::cout << result.ast;
-    if (emitIr) std::cout << result.ir;
+    if (emitIr) std::cout << (result.optIr.empty() ? result.ir : result.optIr);
+    if (showPasses) std::cout << (result.passes.empty() ? "optimizer off (-O0)\n" : result.passes) << "\n";
 
     if (output.empty()) {
         size_t dot = input.rfind('.');

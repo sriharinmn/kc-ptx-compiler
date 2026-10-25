@@ -20,6 +20,14 @@ add_library(kclib
   src/ir.cpp
   src/irgen.cpp
   src/ptx_emit.cpp
+  src/analysis.cpp
+  src/verify.cpp
+  src/opt/inline.cpp
+  src/opt/simplify.cpp
+  src/opt/cse.cpp
+  src/opt/licm.cpp
+  src/opt/dce.cpp
+  src/opt/optimize.cpp
   src/compiler.cpp
 )
 target_include_directories(kclib PUBLIC src)

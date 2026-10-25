@@ -74,7 +74,7 @@ public:
         // 1. Give every value a register (and every phi a mailbox).
         for (const auto& b : fn_.blocks) {
             for (const Inst* in : b->insts) {
-                if (in->type == IrType::Void) continue;
+                if (in->type == IrType::Void || isImmediate(in)) continue;
                 reg_[in] = newReg(in->type);
                 if (in->op == Opc::Phi) mailbox_[in] = newReg(in->type);
             }
@@ -91,7 +91,7 @@ public:
                 } else if (isTerminator(in->op)) {
                     phiMoves(b);
                     terminator(in, next);
-                } else {
+                } else if (!isImmediate(in)) {
                     inst(in);
                 }
             }
@@ -122,7 +122,15 @@ private:
         return kPrefix[i] + std::to_string(count_[i]++);
     }
 
-    const std::string& r(const Inst* v) const { return reg_.at(v); }
+    // PTX accepts i32 and f32 constants directly as operands ("add.s32 %r2, %r1, 1"),
+    // so they need no register. Bool constants still do: a predicate operand must be a register.
+    static bool isImmediate(const Inst* v) { return v->op == Opc::Const && v->type != IrType::Pred; }
+
+    // How an operand is written: its register, or the constant itself.
+    std::string r(const Inst* v) const {
+        if (isImmediate(v)) return v->type == IrType::F32 ? f32Hex(v->fimm) : std::to_string(v->imm);
+        return reg_.at(v);
+    }
 
     // Same style of label as nvcc: $L__BB<function>_<block>
     std::string label(const Block* b) const {
@@ -150,11 +158,8 @@ private:
         const bool isF32 = in->type == IrType::F32;
         const bool isPred = in->type == IrType::Pred;
         switch (in->op) {
-            case Opc::Const:
-                if (isF32)
-                    ins("mov.f32 " + r(in) + ", " + f32Hex(in->fimm));
-                else
-                    ins("mov." + sfx(in->type) + " " + r(in) + ", " + std::to_string(in->imm));
+            case Opc::Const:  // only bools get here: other constants are written into their users
+                ins("mov.pred " + r(in) + ", " + std::to_string(in->imm));
                 break;
             case Opc::Param: {
                 std::string p = "[" + paramName(fn_, in->paramIndex) + "]";
@@ -201,6 +206,10 @@ private:
             case Opc::Sqrt: ins("sqrt.rn.f32 " + r(in) + ", " + r(in->ops[0])); break;
             case Opc::ElemAddr: {
                 // addr = base + index * 4   (mul.wide gives a 64-bit result from 32-bit inputs)
+                if (isImmediate(in->ops[1])) {  // constant index: the byte offset is known now
+                    ins("add.s64 " + r(in) + ", " + r(in->ops[0]) + ", " + std::to_string(in->ops[1]->imm * 4));
+                    break;
+                }
                 std::string offset = newReg(IrType::U64);
                 ins("mul.wide.s32 " + offset + ", " + r(in->ops[1]) + ", 4");
                 ins("add.s64 " + r(in) + ", " + r(in->ops[0]) + ", " + offset);

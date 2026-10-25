@@ -194,6 +194,7 @@
   .c-label { font-weight: 600; color: var(--ink); }
   .c-type { color: var(--ink-soft); }
   .c-phi { background: var(--marker); }
+  .c-pass { color: var(--cobalt); font-weight: 500; }
 
   /* ---- status bar ---- */
   footer {
@@ -246,6 +247,12 @@
         <option value="sm_90">sm_90 (Hopper, H100)</option>
       </select>
     </label>
+    <label>Optimizer
+      <select id="opt">
+        <option value="1" selected>-O1 (on)</option>
+        <option value="0">-O0 (off)</option>
+      </select>
+    </label>
   </div>
 </header>
 
@@ -254,7 +261,8 @@
   <button class="stage" role="tab" data-stage="tokens"><span class="num">2</span><span class="name">Tokens</span><span class="info" id="info-tokens"></span></button>
   <button class="stage" role="tab" data-stage="ast"><span class="num">3</span><span class="name">Syntax tree</span><span class="info" id="info-ast"></span></button>
   <button class="stage" role="tab" data-stage="ir"><span class="num">4</span><span class="name">SSA IR</span><span class="info" id="info-ir"></span></button>
-  <button class="stage" role="tab" data-stage="ptx"><span class="num">5</span><span class="name">PTX</span><span class="info" id="info-ptx"></span></button>
+  <button class="stage" role="tab" data-stage="opt"><span class="num">5</span><span class="name">Optimized IR</span><span class="info" id="info-opt"></span></button>
+  <button class="stage" role="tab" data-stage="ptx"><span class="num">6</span><span class="name">PTX</span><span class="info" id="info-ptx"></span></button>
 </nav>
 
 <main>
@@ -288,6 +296,7 @@ const STAGES = {
   tokens: { title: "Tokens", desc: "The lexer splits the text into words: names, numbers, keywords and symbols." },
   ast:    { title: "Syntax tree", desc: "The parser arranges the tokens into a tree; the type checker adds a type to every expression." },
   ir:     { title: "SSA IR", desc: "The compiler's internal form. Every value is assigned once; a phi picks a value where paths meet." },
+  opt:    { title: "Optimized IR", desc: "The same IR after the optimizer: calls inlined, constants folded, repeats reused, loop-invariant work moved out of loops, unused code deleted." },
   ptx:    { title: "PTX", desc: "NVIDIA's GPU assembly language. The GPU driver turns this into machine code for the actual chip." },
 };
 
@@ -320,10 +329,19 @@ function highlightPtx(text) {
 function highlightIr(text) {
   return text.split("\n").map((raw) => {
     let line = escapeHtml(raw).replace(/(; preds:.*)$/, '<span class="c-dim">$1</span>');
-    if (/^(bb\d+:|kernel )/.test(raw)) return `<span class="c-label">${line}</span>`;
+    if (/^(bb\d+:|kernel |fn )/.test(raw)) return `<span class="c-label">${line}</span>`;
     line = line.replace(/(%\d+)/g, '<span class="c-reg">$1</span>');
     return / = phi\./.test(raw) ? `<span class="c-phi">${line}</span>` : line;
   }).join("\n");
+}
+
+// The pass report on top (passes that changed nothing are dimmed), then the optimized IR.
+function highlightOpt(r) {
+  const report = r.passes.trim().split("\n").map((raw) => {
+    const line = "; " + escapeHtml(raw);
+    return /^\S+\s+0\s/.test(raw) ? `<span class="c-dim">${line}</span>` : `<span class="c-pass">${line}</span>`;
+  }).join("\n");
+  return report + "\n\n" + highlightIr(r.opt);
 }
 
 function highlightAst(text) {
@@ -345,13 +363,21 @@ function summaries(r) {
     tokens: r.tokens ? plural(countLines(r.tokens, /\S/) - 1, "token") : "",
     ast: r.ast ? plural(countLines(r.ast, /\S/), "node") : "",
     ir: r.ir ? `${plural(countLines(r.ir, /^bb\d+:/), "block")}, ${plural(countLines(r.ir, / = phi\./), "phi")}` : "",
+    opt: optSummary(r),
     ptx: r.ptx ? plural(countLines(r.ptx, /^\t[@a-z].*;$/), "instruction") : "",
   };
+}
+
+function optSummary(r) {
+  const m = /IR size: (\d+) -> (\d+)/.exec(r.passes || "");
+  return m ? `${m[1]} → ${m[2]} instructions` : "";
 }
 
 // Which stage stopped the program: the first one with no output.
 function failedStage(r) {
   if (!r.error) return null;
+  if (/^internal compiler error/.test(r.error))  // the verifier caught a bug in the compiler itself
+    return { stage: /after 'irgen'/.test(r.error) ? "ir" : "opt", by: "compiler bug caught by the verifier" };
   if (!r.tokens) return { stage: "tokens", by: "stopped by the lexer" };
   if (!r.ir && !r.ast) return { stage: "ast", by: "stopped by the parser" };
   return { stage: "ast", by: "stopped by the type checker" };
@@ -364,10 +390,11 @@ function renderRail(r) {
   let reached = true;
   for (const btn of document.querySelectorAll(".stage[data-stage]")) {
     const s = btn.dataset.stage;
+    const off = s === "opt" && optLevel() === 0;
     btn.classList.toggle("failed", !!fail && fail.stage === s);
-    btn.classList.toggle("skipped", !reached);
+    btn.classList.toggle("skipped", !reached || off);
     btn.setAttribute("aria-selected", String(s === selected));
-    $("info-" + s).textContent = fail && fail.stage === s ? fail.by : reached ? info[s] : "not reached";
+    $("info-" + s).textContent = fail && fail.stage === s ? fail.by : !reached ? "not reached" : off ? "off (-O0)" : info[s];
     if (fail && fail.stage === s) reached = false;
   }
 }
@@ -379,9 +406,12 @@ function renderOutput(r) {
   if (!text) {
     output.innerHTML = r.error
       ? `<div class="empty"><strong>Not reached.</strong> Fix the error on line ${r.line} first; this stage runs after the compiler accepts your kernel.</div>`
+      : selected === "opt"
+      ? `<div class="empty"><strong>The optimizer is off.</strong> Choose -O1 above to run it, then compare this stage with the SSA IR before it.</div>`
       : `<div class="empty">Nothing to show yet.</div>`;
     return;
   }
+  if (selected === "opt") { output.innerHTML = highlightOpt(r); return; }
   const hl = { tokens: highlightTokens, ast: highlightAst, ir: highlightIr, ptx: highlightPtx }[selected];
   output.innerHTML = hl(text);
 }
@@ -396,7 +426,10 @@ function renderEditor(r) {
 
 function renderStatus(r, ms) {
   const status = $("status");
-  if (r.error) {
+  if (r.error && !r.line) {  // a compiler bug: there is no line in your code to point at
+    status.className = "error";
+    status.textContent = r.error;
+  } else if (r.error) {
     const msg = r.error.replace(/^\d+:\d+: error: /, "");
     status.className = "error";
     status.innerHTML = `<button type="button" id="goto">Line ${r.line}, column ${r.col}</button>: ${escapeHtml(msg)}`;
@@ -424,10 +457,12 @@ function syncScroll() {
 }
 
 // ---- compiling ----
+function optLevel() { return Number($("opt").value); }
+
 function compileNow() {
   if (!kc) return;
   const t0 = performance.now();
-  const json = kc.ccall("kc_explore", "string", ["string", "string"], [source.value, $("arch").value]);
+  const json = kc.ccall("kc_explore", "string", ["string", "string", "number"], [source.value, $("arch").value, optLevel()]);
   const ms = performance.now() - t0;
   last = JSON.parse(json);
   renderRail(last);
@@ -467,6 +502,7 @@ function loadExample(name) {
 
 exampleSelect.addEventListener("change", () => { if (exampleSelect.value) loadExample(exampleSelect.value); });
 $("arch").addEventListener("change", compileNow);
+$("opt").addEventListener("change", () => { store("kc-opt", $("opt").value); compileNow(); });
 source.addEventListener("input", () => { exampleSelect.value = ""; scheduleCompile(); });
 source.addEventListener("scroll", syncScroll);
 source.addEventListener("keydown", (e) => {
@@ -485,10 +521,12 @@ for (const btn of document.querySelectorAll(".stage[data-stage]")) {
   });
 }
 
-// Start-up: a link like index.html?example=reduce&stage=ir opens that example and stage;
-// otherwise restore what this browser had last time.
+// Start-up: a link like index.html?example=reduce&stage=ir&opt=0 opens that example,
+// stage and optimization level; otherwise restore what this browser had last time.
 const params = new URLSearchParams(location.search);
 selected = STAGES[params.get("stage")] ? params.get("stage") : recall("kc-stage") || "ptx";
+const savedOpt = params.get("opt") || recall("kc-opt");
+if (savedOpt === "0" || savedOpt === "1") $("opt").value = savedOpt;
 const saved = recall("kc-source");
 if (KC_EXAMPLES[params.get("example")]) {
   source.value = KC_EXAMPLES[params.get("example")];

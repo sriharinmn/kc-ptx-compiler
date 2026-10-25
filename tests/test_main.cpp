@@ -1,5 +1,7 @@
 // End-to-end tests: compile .kc programs with kc, run them on the real GPU,
 // and compare every output element with the same computation done on the CPU.
+// Every test runs twice: without the optimizer (-O0) and with it (-O1), so an
+// optimizer bug shows up as a test that passes at -O0 but fails at -O1.
 // Usage: kc-tests [-v]     (-v prints the JIT log: registers used per kernel)
 
 #include <algorithm>
@@ -16,10 +18,13 @@
 #include "compiler.h"
 #include "diag.h"
 #include "gpu.h"
+#include "ir.h"
+#include "verify.h"
 
 namespace {
 
 bool gVerbose = false;
+int gOptLevel = 1;  // set by main() before each run of a test
 
 struct TestFailure : std::runtime_error {
     using std::runtime_error::runtime_error;
@@ -46,6 +51,7 @@ std::string example(const std::string& name) { return readFile(std::string(KC_SO
 Module build(Gpu& gpu, const std::string& source) {
     CompileOptions opts;
     opts.arch = gpu.arch();
+    opts.optLevel = gOptLevel;
     Module m(compile(source, opts).ptx);
     if (gVerbose) std::printf("%s", m.jitLog().c_str());
     return m;
@@ -495,6 +501,61 @@ void testRecursion(Gpu& gpu) {
     checkInts(dout.download(), want);
 }
 
+// The hard cases for the inliner: a loop inside the callee, several returns,
+// a call inside a loop condition, nested calls, and a call with no result.
+void testInliningCases(Gpu& gpu) {
+    Module m = build(gpu, R"(
+        fn count_digits(v: i32) -> i32 {
+            let n = 1;
+            let x = v;
+            while (x >= 10) {
+                x = x / 10;
+                n += 1;
+            }
+            return n;
+        }
+        fn sign(v: i32) -> i32 {
+            if (v > 0) {
+                return 1;
+            }
+            if (v < 0) {
+                return -1;
+            }
+            return 0;
+        }
+        fn store_twice(p: *i32, i: i32, v: i32) {
+            p[2 * i] = v;
+            p[2 * i + 1] = v;
+        }
+        kernel k(a: *i32, out: *i32, pairs: *i32, n: i32) {
+            let i = blockIdx.x * blockDim.x + threadIdx.x;
+            if (i >= n) {
+                return;
+            }
+            let v = a[i];
+            let steps = 0;
+            while (count_digits(abs(v) + steps) < 4) {
+                steps += 1;
+            }
+            out[i] = sign(v) * 100000 + steps * 10 + sign(sign(v) - 1);
+            store_twice(pairs, i, v);
+        }
+    )");
+    const int n = 1000;
+    std::vector<int> a = randomInts(n, 23, -2000, 2000), want(n), wantPairs(2 * n);
+    auto sign = [](int v) { return v > 0 ? 1 : v < 0 ? -1 : 0; };
+    for (int i = 0; i < n; ++i) {
+        int steps = std::max(0, 1000 - std::abs(a[i]));  // until |v| + steps has 4 digits
+        want[i] = sign(a[i]) * 100000 + steps * 10 + sign(sign(a[i]) - 1);
+        wantPairs[2 * i] = wantPairs[2 * i + 1] = a[i];
+    }
+    DeviceBuffer<int> da(a), dout(n), dpairs(2 * n);
+    int nArg = n;
+    launch(m.kernel("k"), blocksFor(n, 128), 128, {da.arg(), dout.arg(), dpairs.arg(), &nArg});
+    checkInts(dout.download(), want);
+    checkInts(dpairs.download(), wantPairs);
+}
+
 void testBreakContinue(Gpu& gpu) {
     Module m = build(gpu, R"(
         // For each row: sum the positive values, skipping negatives (continue),
@@ -617,6 +678,168 @@ void testSharedAtomics(Gpu& gpu) {
     checkFloats(dtotal.download(), {sum});
 }
 
+// At -O0 the GPU computes these; at -O1 the optimizer folds them on the CPU.
+// Both must give exactly the GPU's answers, bit for bit, including the odd cases.
+void testConstantFolding(Gpu& gpu) {
+    Module m = build(gpu, R"(
+        kernel consts(outI: *i32, outF: *f32) {
+            outI[0] = 7 / -2;                  // rounds toward zero
+            outI[1] = -7 % 3;
+            outI[2] = 1 << 33;                 // PTX clamps shift amounts to 32
+            outI[3] = -8 >> 40;
+            outI[4] = 2147483647 + 1;          // wraps around
+            outI[5] = i32(3.99);
+            outI[6] = i32(-3.99);
+            outI[7] = i32(10000000000.0);      // clamps to the i32 range
+            outI[8] = i32(-10000000000.0);
+            outI[9] = abs(-5) + min(3, -4) + max(3, -4);
+            outI[10] = (12 & 10) | (12 ^ 10);
+            outI[11] = 100000 * 100000;        // keeps the low 32 bits
+            outI[12] = 0;
+            if (3 < 4 && !(2.0 > 3.0)) {
+                outI[12] = 1;
+            }
+            outF[0] = 1.0 / 3.0;
+            outF[1] = sqrt(2.0);
+            outF[2] = f32(16777217);           // not exactly representable as f32
+            outF[3] = 0.1 + 0.2;
+            outF[4] = -(0.0);                  // negative zero
+            outF[5] = 1.0 / 0.0;               // infinity
+            outF[6] = min(-1.5, 2.5);
+            outF[7] = f32(-7) * 0.5;
+        }
+    )");
+    DeviceBuffer<int> dI(13);
+    DeviceBuffer<float> dF(8);
+    launch(m.kernel("consts"), 1, 1, {dI.arg(), dF.arg()});
+    checkInts(dI.download(), {-3, -1, 0, -1, INT32_MIN, 3, -3, INT32_MAX, INT32_MIN, 4, 14, 1410065408, 1});
+    std::vector<float> wantF = {1.0f / 3.0f, std::sqrt(2.0f), 16777216.0f, 0.1f + 0.2f,
+                                -0.0f, INFINITY, -1.5f, -3.5f};
+    std::vector<float> gotF = dF.download();
+    for (size_t i = 0; i < wantF.size(); ++i)
+        if (std::memcmp(&gotF[i], &wantF[i], sizeof(float)) != 0)
+            throw TestFailure("outF[" + std::to_string(i) + "]: got " + std::to_string(gotF[i]) + ", want " +
+                              std::to_string(wantF[i]) + " (compared bit for bit)");
+}
+
+// CSE may reuse a load only if memory cannot have changed in between.
+void testLoadsAfterStoresAndBarriers(Gpu& gpu) {
+    Module m = build(gpu, R"(
+        kernel k(p: *i32, out: *i32) {
+            shared s: i32[64];
+            let t = threadIdx.x;
+            let a = p[t];
+            p[t] = a + 1;
+            let b = p[t];                  // must load again: the store changed p[t]
+            s[t] = 0;
+            barrier();
+            let before = s[(t + 1) % 64];  // 0
+            barrier();
+            s[t] = t;
+            barrier();
+            let after = s[(t + 1) % 64];   // must load again: another thread wrote it
+            out[t] = a * 10000 + b * 100 + before + after;
+        }
+    )");
+    std::vector<int> p = randomInts(64, 22, 0, 50), want(64);
+    for (int t = 0; t < 64; ++t) want[t] = p[t] * 10000 + (p[t] + 1) * 100 + (t + 1) % 64;
+    DeviceBuffer<int> dp(p), dout(64);
+    launch(m.kernel("k"), 1, 64, {dp.arg(), dout.arg()});
+    checkInts(dout.download(), want);
+}
+
+int countOf(const std::string& text, const std::string& what) {
+    int n = 0;
+    for (size_t at = text.find(what); at != std::string::npos; at = text.find(what, at + 1)) n++;
+    return n;
+}
+
+std::string ptxAt(const std::string& source, int level) {
+    CompileOptions opts;
+    opts.optLevel = level;
+    return compile(source, opts).ptx;
+}
+
+// Each pass does the job it is meant to do (checked in the PTX it produces).
+void testOptimizerPasses(Gpu&) {
+    // inline: no calls or .func left (ptxas would not inline them for us)
+    CHECK(countOf(ptxAt(example("device_fn.kc"), 0), "call") == 2);
+    CHECK(countOf(ptxAt(example("device_fn.kc"), 1), "call") == 0);
+    CHECK(countOf(ptxAt(example("device_fn.kc"), 1), ".func") == 0);
+    // cse: saxpy computes the address of y[i] once instead of twice
+    CHECK(countOf(ptxAt(example("saxpy.kc"), 0), "mul.wide") == 3);
+    CHECK(countOf(ptxAt(example("saxpy.kc"), 1), "mul.wide") == 2);
+    // licm: row_sum's loop body ($L__BB0_2 up to the jump back) no longer multiplies r * cols
+    auto loopBody = [](const std::string& ptx) {
+        size_t start = ptx.find("$L__BB0_2:");
+        return ptx.substr(start, ptx.find("bra.uni \t$L__BB0_2;") - start);
+    };
+    CHECK(countOf(loopBody(ptxAt(example("row_sum.kc"), 0)), "mul.lo") == 1);
+    CHECK(countOf(loopBody(ptxAt(example("row_sum.kc"), 1)), "mul.lo") == 0);
+    // simplify + dce: constants folded, the impossible branch and the unused load are gone
+    std::string folded = ptxAt(R"(
+        kernel k(a: *i32, out: *i32) {
+            let unused = a[0] * 2;
+            let x = 2 + 3 * 4;
+            if (x > 100) {
+                out[1] = 5;
+            }
+            out[0] = x;
+        }
+    )", 1);
+    CHECK(countOf(folded, "ld.global") == 0);
+    CHECK(countOf(folded, "bra") == 0);
+    CHECK(countOf(folded, "st.global.u32 \t[%rd0], 14;") == 1);
+    // the same input always gives the same output
+    CHECK(ptxAt(example("matmul.kc"), 1) == ptxAt(example("matmul.kc"), 1));
+}
+
+// Appends an instruction to block b (for building IR by hand).
+Inst* append(IrFunction& f, Block* b, Opc op, IrType type, std::vector<Inst*> ops = {}) {
+    Inst* in = f.newInst(op, type);
+    in->ops = std::move(ops);
+    in->parent = b;
+    b->insts.push_back(in);
+    return in;
+}
+
+void expectVerifyError(const IrFunction& f, const std::string& expected) {
+    try {
+        verifyFunction(f, "test");
+    } catch (const InternalError& e) {
+        if (std::string(e.what()).find(expected) == std::string::npos)
+            throw TestFailure("wrong verifier error \"" + std::string(e.what()) + "\"");
+        return;
+    }
+    throw TestFailure("verifier accepted broken IR, expected: " + expected);
+}
+
+// The verifier catches broken IR (built by hand here, the way a buggy pass would leave it).
+void testVerifier(Gpu&) {
+    {
+        IrFunction f;
+        f.name = "f";
+        Block* b = f.newBlock();
+        Inst* one = f.newInst(Opc::Const, IrType::S32);
+        append(f, b, Opc::Add, IrType::S32, {one, one});
+        one->parent = b;
+        b->insts.push_back(one);  // defined after its use
+        append(f, b, Opc::Ret, IrType::Void);
+        expectVerifyError(f, "uses a value before it is computed");
+        std::swap(b->insts[0], b->insts[1]);
+        verifyFunction(f, "test");  // in the right order it is fine
+    }
+    {
+        IrFunction f;
+        f.name = "f";
+        Block* b0 = f.newBlock();
+        Block* b1 = f.newBlock();
+        append(f, b0, Opc::Br, IrType::Void)->targets = {b1};  // b1->preds does not list b0
+        append(f, b1, Opc::Ret, IrType::Void);
+        expectVerifyError(f, "predecessor list does not match");
+    }
+}
+
 void testCompileErrors(Gpu&) {
     expectError("kernel k(n: i32) { let x = 1 + 2.0; }", "must have the same type");
     expectError("kernel k() { y = 1; }", "unknown variable 'y'");
@@ -673,9 +896,14 @@ const Test kTests[] = {
     {"histogram.kc (atomic_add)", testHistogram},
     {"device_fn.kc (device functions, bool return)", testDeviceFunctions},
     {"recursive device functions", testRecursion},
+    {"inlining: loops, several returns, calls in conditions", testInliningCases},
     {"break and continue", testBreakContinue},
     {"sqrt, abs, min, max", testMathBuiltins},
     {"atomics on shared memory and on f32", testSharedAtomics},
+    {"constant folding gives the GPU's answers, bit for bit", testConstantFolding},
+    {"loads are not reused across stores and barriers", testLoadsAfterStoresAndBarriers},
+    {"optimizer passes: inline, cse, licm, simplify, dce", testOptimizerPasses},
+    {"IR verifier catches broken IR", testVerifier},
     {"compile errors are reported", testCompileErrors},
 };
 
@@ -687,16 +915,25 @@ int main(int argc, char** argv) {
 
     try {
         Gpu gpu;
-        std::printf("GPU: %s (%s)\n", gpu.name().c_str(), gpu.arch().c_str());
+        std::printf("GPU: %s (%s), each test runs at -O0 and at -O1\n", gpu.name().c_str(), gpu.arch().c_str());
         int passed = 0, total = 0;
         for (const Test& t : kTests) {
             total++;
-            try {
-                t.fn(gpu);
+            std::string failure;
+            for (int level : {0, 1}) {
+                gOptLevel = level;
+                try {
+                    t.fn(gpu);
+                } catch (const std::exception& e) {
+                    failure = "at -O" + std::to_string(level) + ": " + e.what();
+                    break;
+                }
+            }
+            if (failure.empty()) {
                 passed++;
                 std::printf("  PASS  %s\n", t.name);
-            } catch (const std::exception& e) {
-                std::printf("  FAIL  %s\n        %s\n", t.name, e.what());
+            } else {
+                std::printf("  FAIL  %s\n        %s\n", t.name, failure.c_str());
             }
         }
         std::printf("%d/%d tests passed\n", passed, total);

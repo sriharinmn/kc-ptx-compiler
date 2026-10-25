@@ -5,10 +5,72 @@
 #include <sstream>
 
 bool isTerminator(Opc op) { return op == Opc::Br || op == Opc::CondBr || op == Opc::Ret; }
+bool isCompare(Opc op) { return op >= Opc::Lt && op <= Opc::Ne; }
+
+bool isPure(Opc op) {
+    switch (op) {
+        case Opc::Const:
+        case Opc::SReg:  // %tid.x etc. never change while a thread runs
+        case Opc::Add: case Opc::Sub: case Opc::Mul: case Opc::Div: case Opc::Rem:
+        case Opc::And: case Opc::Or: case Opc::Xor: case Opc::Shl: case Opc::Shr:
+        case Opc::Neg: case Opc::Not:
+        case Opc::Lt: case Opc::Le: case Opc::Gt: case Opc::Ge: case Opc::Eq: case Opc::Ne:
+        case Opc::CvtI2F: case Opc::CvtF2I:
+        case Opc::Min: case Opc::Max: case Opc::Abs: case Opc::Sqrt:
+        case Opc::ElemAddr: case Opc::SharedAddr:
+            return true;
+        default:
+            return false;  // Param, Load, Phi, memory writes, calls, jumps
+    }
+}
+
+bool hasSideEffects(Opc op) {
+    return op == Opc::Store || op == Opc::AtomicAdd || op == Opc::Barrier || op == Opc::Call || isTerminator(op);
+}
 
 Inst* Block::terminator() const {
     if (insts.empty() || !isTerminator(insts.back()->op)) return nullptr;
     return insts.back();
+}
+
+IrFunction* IrModule::find(const std::string& name) const {
+    for (const auto& f : funcs)
+        if (f->name == name) return f.get();
+    return nullptr;
+}
+
+std::vector<Block*> successors(const Block* b) {
+    Inst* t = b->terminator();
+    return t ? t->targets : std::vector<Block*>{};
+}
+
+int instCount(const IrFunction& f) {
+    int n = 0;
+    for (const auto& b : f.blocks) n += static_cast<int>(b->insts.size());
+    return n;
+}
+
+// There are no use lists, so this scans the whole function. That is fine for
+// kernels of a few hundred instructions, and much simpler to keep correct.
+void replaceAllUses(IrFunction& f, Inst* from, Inst* to) {
+    for (auto& b : f.blocks)
+        for (Inst* in : b->insts)
+            for (Inst*& op : in->ops)
+                if (op == from) op = to;
+}
+
+void eraseInst(Inst* in) {
+    auto& insts = in->parent->insts;
+    insts.erase(std::find(insts.begin(), insts.end(), in));
+    in->parent = nullptr;
+}
+
+// Phi operand i belongs to preds[i], so both lists must shrink together.
+void removeEdge(Block* from, Block* to) {
+    size_t i = std::find(to->preds.begin(), to->preds.end(), from) - to->preds.begin();
+    to->preds.erase(to->preds.begin() + i);
+    for (Inst* in : to->insts)
+        if (in->op == Opc::Phi) in->ops.erase(in->ops.begin() + i);
 }
 
 Inst* IrFunction::newInst(Opc op, IrType type) {
@@ -100,10 +162,11 @@ const char* opcName(Opc op) {
     return "?";
 }
 
-bool isCompare(Opc op) { return op >= Opc::Lt && op <= Opc::Ne; }
-
 std::string val(const Inst* v) { return "%" + std::to_string(v->id); }
 
+}  // namespace
+
+// Also used for verifier messages, so it must not crash on a broken instruction.
 std::string printInst(const Inst* in) {
     std::ostringstream os;
     if (in->type != IrType::Void) os << val(in) << " = ";
@@ -114,7 +177,7 @@ std::string printInst(const Inst* in) {
     if (memory && in->shared) os << ".shared";
     if (memory || in->op == Opc::ElemAddr)
         os << "." << irTypeName(in->memType);
-    else if (isCompare(in->op))
+    else if (isCompare(in->op) && !in->ops.empty())
         os << "." << irTypeName(in->ops[0]->type);
     else if (in->type != IrType::Void)
         os << "." << irTypeName(in->type);
@@ -141,11 +204,14 @@ std::string printInst(const Inst* in) {
             break;
         case Opc::Phi:
             for (size_t i = 0; i < in->ops.size(); ++i)
-                os << (i ? ", " : " ") << "[bb" << in->parent->preds[i]->id << ": " << val(in->ops[i]) << "]";
+                os << (i ? ", " : " ") << "[bb"
+                   << (in->parent && i < in->parent->preds.size() ? std::to_string(in->parent->preds[i]->id) : "?")
+                   << ": " << val(in->ops[i]) << "]";
             break;
-        case Opc::Br: os << " bb" << in->targets[0]->id; break;
+        case Opc::Br:
         case Opc::CondBr:
-            os << " " << val(in->ops[0]) << ", bb" << in->targets[0]->id << ", bb" << in->targets[1]->id;
+            for (const Inst* op : in->ops) os << " " << val(op) << ",";
+            for (size_t i = 0; i < in->targets.size(); ++i) os << (i ? ", bb" : " bb") << in->targets[i]->id;
             break;
         default:
             for (size_t i = 0; i < in->ops.size(); ++i) os << (i ? ", " : " ") << val(in->ops[i]);
@@ -153,8 +219,6 @@ std::string printInst(const Inst* in) {
     }
     return os.str();
 }
-
-}  // namespace
 
 std::string printIr(const IrModule& m) {
     std::ostringstream os;

@@ -2,9 +2,11 @@
 
 #include "irgen.h"
 #include "lexer.h"
+#include "opt/opt.h"
 #include "parser.h"
 #include "ptx_emit.h"
 #include "sema.h"
+#include "verify.h"
 
 namespace {
 
@@ -20,7 +22,12 @@ void runPipeline(const std::string& source, const CompileOptions& opts, CompileR
     r.ast = printAst(program);  // now with types
 
     IrModule ir = generateIr(program);
-    r.ir = printIr(ir);
+    r.ir = printIr(ir);  // before verifying, so a broken IR can still be looked at
+    verifyModule(ir, "irgen");
+    if (opts.optLevel > 0) {
+        r.passes = optimize(ir, opts.optLevel);
+        r.optIr = printIr(ir);
+    }
     r.ptx = emitPtx(ir, opts.arch);
 }
 
@@ -40,6 +47,8 @@ ExploreResult explore(const std::string& source, const CompileOptions& opts) {
         result.error = e.what();
         result.errorLine = e.loc.line;
         result.errorCol = e.loc.col;
+    } catch (const InternalError& e) {
+        result.error = e.what();  // a compiler bug: no source position to point at
     }
     return result;
 }

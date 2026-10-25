@@ -98,8 +98,26 @@ struct IrFunction {
 
 struct IrModule {
     std::vector<std::unique_ptr<IrFunction>> funcs;
+
+    IrFunction* find(const std::string& name) const;  // nullptr if there is no such function
 };
 
 bool isTerminator(Opc op);
+bool isCompare(Opc op);
 const char* irTypeName(IrType t);
 std::string printIr(const IrModule& m);
+std::string printInst(const Inst* in);
+
+// ---- helpers used by the optimizer and the verifier ----
+
+// Pure = the result depends only on the operands: no memory reads, no side
+// effects. Two pure instructions with the same operands always give the same value.
+bool isPure(Opc op);
+// Must be kept even if nothing uses the result (writes memory, waits, calls, jumps).
+bool hasSideEffects(Opc op);
+
+std::vector<Block*> successors(const Block* b);     // where b's terminator can jump
+int instCount(const IrFunction& f);
+void replaceAllUses(IrFunction& f, Inst* from, Inst* to);
+void eraseInst(Inst* in);                           // takes it out of its block
+void removeEdge(Block* from, Block* to);            // forget one 'from -> to' edge (and its phi operands)
