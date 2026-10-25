@@ -2,6 +2,7 @@
 // with the verifier, and counts what each pass changed for the report.
 
 #include <cstdio>
+#include <cstdlib>
 
 #include "opt.h"
 #include "verify.h"
@@ -27,6 +28,13 @@ constexpr int kNumPasses = sizeof kPasses / sizeof kPasses[0];
 // changes. Usually 2-3 rounds; the limit only guards against a bug looping forever.
 constexpr int kMaxRounds = 10;
 
+// Debugging aid: KC_SKIP_PASSES=licm,unroll turns those passes off. When a
+// program goes wrong at -O1, skipping passes one by one shows which one is to blame.
+bool skipped(const std::string& pass) {
+    const char* list = std::getenv("KC_SKIP_PASSES");
+    return list && ("," + std::string(list) + ",").find("," + pass + ",") != std::string::npos;
+}
+
 int totalInsts(const IrModule& m) {
     int n = 0;
     for (const auto& f : m.funcs) n += instCount(*f);
@@ -45,7 +53,7 @@ std::string optimize(IrModule& m, int level) {
     if (level <= 0) return "";
     int sizeBefore = totalInsts(m);
 
-    int inlined = inlineCalls(m);
+    int inlined = skipped("inline") ? 0 : inlineCalls(m);
     verifyModule(m, "inline");
 
     int counts[kNumPasses] = {};
@@ -53,6 +61,7 @@ std::string optimize(IrModule& m, int level) {
         for (int round = 0; round < kMaxRounds; ++round) {
             int changes = 0;
             for (int p = 0; p < kNumPasses; ++p) {
+                if (skipped(kPasses[p].name)) continue;
                 int n = kPasses[p].run(f);
                 verifyFunction(f, kPasses[p].name);
                 counts[p] += n;
@@ -67,7 +76,7 @@ std::string optimize(IrModule& m, int level) {
         rounds(*f);
         // Unrolling comes after the first rounds, so loops are already clean (invariants
         // moved out), and the copies it makes get cleaned up by one more set of rounds.
-        int n = unrollLoops(*f);
+        int n = skipped("unroll") ? 0 : unrollLoops(*f);
         verifyFunction(*f, "unroll");
         if (n) rounds(*f);
         unrolled += n;

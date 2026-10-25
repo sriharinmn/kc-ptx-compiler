@@ -34,7 +34,10 @@ private:
 // GPU code loaded onto the GPU.
 class Module {
 public:
-    explicit Module(const std::string& ptx);         // JIT-compiles; throws with ptxas' error log on failure
+    // JIT-compiles; throws with ptxas' error log on failure. ptxasOptLevel 0-4 (4 = full
+    // optimization, the default); 0 turns ptxas' optimizer off, which helps tell whether a
+    // wrong result comes from the PTX or from ptxas.
+    explicit Module(const std::string& ptx, int ptxasOptLevel = 4);
     explicit Module(const std::vector<char>& cubin);  // already compiled machine code (see ptx_compiler.h)
     ~Module();
     Module(Module&& other) noexcept;

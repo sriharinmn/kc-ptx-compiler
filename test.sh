@@ -25,6 +25,12 @@ for f in "$SRC"/examples/*.kc; do
   [ "$fromPtxas" = "$fromElf" ] || { echo "  cubin-info disagrees with ptxas"; exit 1; }
 done
 
+# Random programs: each one must give the same output at -O0 and -O1.
+# (A failing program is saved as fuzz_fail_<seed>.kc in the build folder.)
+echo
+echo "random program testing (-O0 and -O1 must agree):"
+(cd "$BUILD" && ./kc-fuzz 100 | sed "s/^/  /")
+
 # compute-sanitizer re-runs the tests while watching every memory access the
 # GPU makes, and reports out-of-bounds or misaligned reads/writes.
 echo

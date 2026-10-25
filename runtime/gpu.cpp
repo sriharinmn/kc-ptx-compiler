@@ -35,7 +35,7 @@ std::string Gpu::arch() const {
     return "sm_" + std::to_string(major) + std::to_string(minor);
 }
 
-Module::Module(const std::string& ptx) {
+Module::Module(const std::string& ptx, int ptxasOptLevel) {
     // Ask the JIT for its logs. The info log (with LOG_VERBOSE) reports registers used per kernel.
     char infoLog[8192] = {};
     char errorLog[8192] = {};
@@ -44,13 +44,15 @@ Module::Module(const std::string& ptx) {
         CU_JIT_INFO_LOG_BUFFER,  CU_JIT_INFO_LOG_BUFFER_SIZE_BYTES,
         CU_JIT_ERROR_LOG_BUFFER, CU_JIT_ERROR_LOG_BUFFER_SIZE_BYTES,
         CU_JIT_LOG_VERBOSE,      CU_JIT_GENERATE_LINE_INFO,
+        CU_JIT_OPTIMIZATION_LEVEL,
     };
     void* values[] = {
         infoLog,  reinterpret_cast<void*>(static_cast<uintptr_t>(sizeof infoLog)),
         errorLog, reinterpret_cast<void*>(static_cast<uintptr_t>(sizeof errorLog)),
         reinterpret_cast<void*>(static_cast<uintptr_t>(1)), reinterpret_cast<void*>(static_cast<uintptr_t>(1)),
+        reinterpret_cast<void*>(static_cast<uintptr_t>(ptxasOptLevel)),
     };
-    CUresult r = cuModuleLoadDataEx(&mod_, ptx.c_str(), 6, options, values);
+    CUresult r = cuModuleLoadDataEx(&mod_, ptx.c_str(), 7, options, values);
     log_ = infoLog;
     if (r != CUDA_SUCCESS) {
         const char* name = nullptr;

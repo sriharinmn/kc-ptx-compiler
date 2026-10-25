@@ -48,6 +48,23 @@ byte-identical). But it leaves three things to the front end, as nvcc's NVVM sta
 - **division by a constant**: ptxas emits a ~20-instruction division routine even for `/ 2`
   (block_sum 0.64 → 0.56 ms)
 
+The full write-up, with the method and charts, is the technical report: [`docs/report.pdf`](docs/report.pdf).
+
+## Playground
+
+The same compiler, built to WebAssembly, runs in the browser (`web/index.html`, no server).
+Every stage updates as you type: tokens, syntax tree, SSA IR, optimized IR (with what each pass
+changed) and PTX.
+
+![Source line 6 highlights the PTX it became](docs/images/playground-line-to-ptx.png)
+*The cursor's source line highlights the PTX it became (from the `.loc` line info).*
+
+![The optimized IR stage with the pass report](docs/images/playground-optimizer.png)
+*Stage 5: both device functions inlined and deleted, with the report of what each pass did.*
+
+![A barrier after an early return gets a warning](docs/images/playground-warning.png)
+*The divergence analysis warns about a `barrier()` that threads past the early `return` never reach.*
+
 ## What's inside
 
 **Language:** kernels and device functions (with recursion), `i32` / `f32` / `bool` and
@@ -76,7 +93,14 @@ relocations, and shows the cost of separate compilation (24 registers instead of
 
 **Testing:** 33 end-to-end tests run on the GPU at both `-O0` and `-O1` and compare every
 result with a CPU reference (warp operations are tested for both sm_89 and sm_75 code);
-examples are checked with `ptxas` and `cubin-info`; compute-sanitizer memcheck and racecheck are clean.
+examples are checked with `ptxas` and `cubin-info`; random program testing (`kc-fuzz`) checks that
+`-O0` and `-O1` agree on random kernels; compute-sanitizer memcheck and racecheck are clean.
+
+**A ptxas bug, found by the random tester:** across 2,050 random programs, kc-fuzz found no kc
+bugs, but one mismatch shrank to six PTX instructions (`abs`, `neg`, `setp.ge ..., -5`) that
+ptxas `-O3` folds to "always false" on sm_75 through sm_90 (`-O0` is correct). nvcc never emits
+that pattern, because its front end rewrites the comparison first. Reproducer:
+[`tests/ptx/ptxas_neg_abs.ptx`](tests/ptx/ptxas_neg_abs.ptx); details in the report.
 
 ## Build and test (WSL2 / Linux, CUDA 12+)
 

@@ -3,3 +3,5 @@ build/
 !tests/ptx/*.ptx
 *.cubin
 *.o
+__pycache__/
+fuzz_fail_*.kc

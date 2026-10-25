@@ -69,3 +69,6 @@ target_compile_definitions(kc-bench PRIVATE KC_SOURCE_DIR="${CMAKE_SOURCE_DIR}" 
 add_executable(kc-link tools/kc_link.cpp)
 target_link_libraries(kc-link PRIVATE ptxc)
 add_executable(cubin-info tools/cubin_info.cpp)
+# Random program testing: random kernels must give the same output at -O0 and -O1.
+add_executable(kc-fuzz tools/fuzz.cpp)
+target_link_libraries(kc-fuzz PRIVATE kclib gpurt)

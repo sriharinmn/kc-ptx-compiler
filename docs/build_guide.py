@@ -130,7 +130,8 @@ def make_table(rows: list, width: float) -> Table:
     return t
 
 
-def parse(md: str, width: float) -> list:
+def parse(md: str, width: float, charts=None, title_gap=5 * cm) -> list:
+    """Markdown -> reportlab flowables. charts: {name: function(width) -> flowable} for <!-- chart: name -->."""
     lines = md.splitlines()
     story, para = [], []
     title_done = False
@@ -147,7 +148,11 @@ def parse(md: str, width: float) -> list:
         line = lines[i]
         stripped = line.strip()
 
-        if stripped == "<!-- pagebreak -->":
+        chart = re.fullmatch(r"<!-- chart: (\w+) -->", stripped)
+        if chart:
+            flush()
+            story.append(charts[chart.group(1)](width))
+        elif stripped == "<!-- pagebreak -->":
             flush()
             story.append(PageBreak())
             in_title_page = False
@@ -161,11 +166,12 @@ def parse(md: str, width: float) -> list:
             story.append(Preformatted("\n".join(code), STYLES["code"]))
         elif stripped.startswith("# "):
             flush()
-            story.append(Spacer(1, 5 * cm))
+            story.append(Spacer(1, title_gap))
             story.append(Paragraph(inline(stripped[2:]), STYLES["title"]))
             title_done = True
         elif stripped.startswith("## "):
             flush()
+            in_title_page = False  # the title's subtitle lines end at the first section
             story.append(Paragraph(inline(stripped[3:]), STYLES["h2"]))
         elif stripped.startswith("### "):
             flush()
@@ -214,27 +220,30 @@ def parse(md: str, width: float) -> list:
     return story
 
 
-def decorate(canvas, doc):
-    if doc.page == 1:
-        return
-    canvas.saveState()
-    canvas.setFont("Sans", 8)
-    canvas.setFillColor(MUTED)
-    canvas.drawString(doc.leftMargin, A4[1] - 1.2 * cm, "kc: Guide")
-    canvas.drawRightString(A4[0] - doc.rightMargin, 1.2 * cm, str(doc.page))
-    canvas.setStrokeColor(RULE)
-    canvas.setLineWidth(0.5)
-    canvas.line(doc.leftMargin, A4[1] - 1.35 * cm, A4[0] - doc.rightMargin, A4[1] - 1.35 * cm)
-    canvas.restoreState()
+def build(source: Path, output: Path, header: str, charts=None, title_gap=5 * cm):
+    """Markdown file -> PDF, with 'header' at the top of every page after the first."""
+    def decorate(canvas, doc):
+        if doc.page == 1:
+            return
+        canvas.saveState()
+        canvas.setFont("Sans", 8)
+        canvas.setFillColor(MUTED)
+        canvas.drawString(doc.leftMargin, A4[1] - 1.2 * cm, header)
+        canvas.drawRightString(A4[0] - doc.rightMargin, 1.2 * cm, str(doc.page))
+        canvas.setStrokeColor(RULE)
+        canvas.setLineWidth(0.5)
+        canvas.line(doc.leftMargin, A4[1] - 1.35 * cm, A4[0] - doc.rightMargin, A4[1] - 1.35 * cm)
+        canvas.restoreState()
+
+    doc = SimpleDocTemplate(str(output), pagesize=A4, leftMargin=2.1 * cm, rightMargin=2.1 * cm,
+                            topMargin=2.0 * cm, bottomMargin=2.0 * cm, title=header, author="kc project")
+    story = parse(source.read_text(encoding="utf-8"), doc.width, charts, title_gap)
+    doc.build(story, onFirstPage=decorate, onLaterPages=decorate)
+    print(f"wrote {output}")
 
 
 def main():
-    doc = SimpleDocTemplate(str(OUTPUT), pagesize=A4, leftMargin=2.1 * cm, rightMargin=2.1 * cm,
-                            topMargin=2.0 * cm, bottomMargin=2.0 * cm, title="kc: Guide",
-                            author="kc project")
-    story = parse(SOURCE.read_text(encoding="utf-8"), doc.width)
-    doc.build(story, onFirstPage=decorate, onLaterPages=decorate)
-    print(f"wrote {OUTPUT}")
+    build(SOURCE, OUTPUT, "kc: Guide")
 
 
 if __name__ == "__main__":
