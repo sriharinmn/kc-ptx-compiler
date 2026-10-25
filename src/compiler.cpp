@@ -1,5 +1,6 @@
 #include "compiler.h"
 
+#include "divergence.h"
 #include "irgen.h"
 #include "lexer.h"
 #include "opt/opt.h"
@@ -24,6 +25,8 @@ void runPipeline(const std::string& source, const CompileOptions& opts, CompileR
     IrModule ir = generateIr(program);
     r.ir = printIr(ir);  // before verifying, so a broken IR can still be looked at
     verifyModule(ir, "irgen");
+    // Checked before optimizing, so the warnings are the same at -O0 and -O1.
+    for (const std::string& w : divergenceWarnings(ir)) r.warnings += w + "\n";
     if (opts.optLevel > 0) {
         r.passes = optimize(ir, opts.optLevel);
         r.optIr = printIr(ir);

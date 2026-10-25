@@ -22,11 +22,13 @@ add_library(kclib
   src/ptx_emit.cpp
   src/analysis.cpp
   src/verify.cpp
+  src/divergence.cpp
   src/opt/inline.cpp
   src/opt/simplify.cpp
   src/opt/cse.cpp
   src/opt/licm.cpp
   src/opt/dce.cpp
+  src/opt/unroll.cpp
   src/opt/optimize.cpp
   src/compiler.cpp
 )
@@ -45,3 +47,19 @@ target_link_libraries(gpurt PUBLIC CUDA::cuda_driver)
 add_executable(kc-tests tests/test_main.cpp)
 target_link_libraries(kc-tests PRIVATE kclib gpurt)
 target_compile_definitions(kc-tests PRIVATE KC_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+
+# Benchmark: kc vs nvcc on the same kernels. bench/kernels.cu (CUDA C++) is
+# compiled to PTX by nvcc; kc's PTX and nvcc's PTX then go through the same
+# ptxas, the PTX Compiler API library (runtime/ptx_compiler.cpp).
+set(NVCC_PTX ${CMAKE_BINARY_DIR}/bench_kernels.ptx)
+add_custom_command(
+  OUTPUT ${NVCC_PTX}
+  COMMAND ${CUDAToolkit_NVCC_EXECUTABLE} -ptx -arch=sm_89 -o ${NVCC_PTX} ${CMAKE_SOURCE_DIR}/bench/kernels.cu
+  DEPENDS bench/kernels.cu
+  COMMENT "nvcc: bench/kernels.cu -> PTX")
+add_library(ptxc runtime/ptx_compiler.cpp)
+target_include_directories(ptxc PUBLIC runtime)
+target_link_libraries(ptxc PUBLIC CUDA::nvptxcompiler_static)
+add_executable(kc-bench bench/bench_main.cpp ${NVCC_PTX})
+target_link_libraries(kc-bench PRIVATE kclib gpurt ptxc)
+target_compile_definitions(kc-bench PRIVATE KC_SOURCE_DIR="${CMAKE_SOURCE_DIR}" NVCC_PTX="${NVCC_PTX}")

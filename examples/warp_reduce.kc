@@ -1,0 +1,15 @@
+// Sum of a whole array, using warp-level operations instead of shared memory.
+// warp_sum adds one value from each of the 32 threads of a warp. On sm_80 and
+// newer it is a single instruction (redux.sync); on older GPUs kc turns it into
+// 5 shuffle steps. Then one thread per warp adds the warp's total to out[0].
+kernel warp_reduce(x: *i32, out: *i32, n: i32) {
+    let i = blockIdx.x * blockDim.x + threadIdx.x;
+    let v = 0;
+    if (i < n) {
+        v = x[i];
+    }
+    let total = warp_sum(v);
+    if (lane_id() == 0) {
+        atomic_add(out[0], total);
+    }
+}

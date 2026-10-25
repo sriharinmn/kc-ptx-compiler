@@ -58,6 +58,8 @@ Module::Module(const std::string& ptx) {
     }
 }
 
+Module::Module(const std::vector<char>& cubin) { cuCheck(cuModuleLoadData(&mod_, cubin.data()), "cuModuleLoadData"); }
+
 Module::~Module() {
     if (mod_) cuModuleUnload(mod_);
 }
@@ -73,4 +75,21 @@ CUfunction Module::kernel(const std::string& name) const {
 void launch(CUfunction f, unsigned blocks, unsigned threads, std::vector<void*> args) {
     cuCheck(cuLaunchKernel(f, blocks, 1, 1, threads, 1, 1, 0, nullptr, args.data(), nullptr), "cuLaunchKernel");
     cuCheck(cuCtxSynchronize(), "kernel execution");
+}
+
+float timeKernelMs(CUfunction f, unsigned blocks, unsigned threads, std::vector<void*> args, int reps) {
+    launch(f, blocks, threads, args);  // warm-up: the first launch also pays one-time costs
+    CUevent start, stop;
+    cuCheck(cuEventCreate(&start, CU_EVENT_DEFAULT), "cuEventCreate");
+    cuCheck(cuEventCreate(&stop, CU_EVENT_DEFAULT), "cuEventCreate");
+    cuCheck(cuEventRecord(start, nullptr), "cuEventRecord");
+    for (int i = 0; i < reps; ++i)
+        cuCheck(cuLaunchKernel(f, blocks, 1, 1, threads, 1, 1, 0, nullptr, args.data(), nullptr), "cuLaunchKernel");
+    cuCheck(cuEventRecord(stop, nullptr), "cuEventRecord");
+    cuCheck(cuEventSynchronize(stop), "kernel execution");
+    float ms = 0;
+    cuCheck(cuEventElapsedTime(&ms, start, stop), "cuEventElapsedTime");
+    cuEventDestroy(start);
+    cuEventDestroy(stop);
+    return ms / reps;
 }

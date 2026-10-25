@@ -172,6 +172,80 @@ bool foldConstant(Inst* in) {
     }
 }
 
+// Creates an instruction right before 'at', in the same block.
+Inst* insertBefore(IrFunction& f, Inst* at, Opc op, IrType type, std::vector<Inst*> ops) {
+    Inst* in = f.newInst(op, type);
+    in->ops = std::move(ops);
+    in->parent = at->parent;
+    auto& insts = at->parent->insts;
+    insts.insert(std::find(insts.begin(), insts.end(), at), in);
+    return in;
+}
+Inst* intBefore(IrFunction& f, Inst* at, long long value) {
+    Inst* c = insertBefore(f, at, Opc::Const, IrType::S32, {});
+    c->imm = value;
+    return c;
+}
+
+// Can v never be negative? Thread and block numbers can't, nor can constants
+// >= 0, and some operations keep a value >= 0. A phi is >= 0 if all its inputs
+// are; for a phi we are already checking (a loop), we assume yes: that is a proof
+// by induction (true when the loop starts, and each round keeps it true).
+bool nonNegative(const Inst* v, std::set<const Inst*>& checking) {
+    auto nn = [&](const Inst* x) { return nonNegative(x, checking); };
+    switch (v->op) {
+        case Opc::Const: return v->type == IrType::S32 && v->imm >= 0;
+        case Opc::SReg: return true;  // %tid, %ctaid, %ntid, %nctaid, %laneid
+        case Opc::And: return nn(v->ops[0]) || nn(v->ops[1]);  // the sign bit stays 0
+        case Opc::Shr: case Opc::Rem: return nn(v->ops[0]);
+        case Opc::Div: return nn(v->ops[0]) && nn(v->ops[1]);
+        case Opc::Min: return nn(v->ops[0]) && nn(v->ops[1]);
+        case Opc::Max: return nn(v->ops[0]) || nn(v->ops[1]);
+        case Opc::Phi: {
+            if (checking.count(v)) return true;  // the induction assumption
+            checking.insert(v);
+            bool all = std::all_of(v->ops.begin(), v->ops.end(), nn);
+            checking.erase(v);
+            return all;
+        }
+        default: return false;  // e.g. x + y can overflow into the negative numbers
+    }
+}
+
+// Strength reduction: x / 2^k and x % 2^k without a division instruction.
+// ptxas turns div.s32 into a ~20-instruction division routine, even for "/ 2"
+// (checked in the SASS), so kc uses shifts instead, like nvcc does:
+//   x >= 0:     x / 2^k = x >> k                  x % 2^k = x & (2^k - 1)
+//   otherwise:  t = x + (x < 0 ? 2^k - 1 : 0)     (so the shift rounds toward zero, like division)
+//               x / 2^k = t >> k                  x % 2^k = x - (t & -2^k)
+bool divideByPowerOfTwo(IrFunction& f, Inst* in) {
+    Inst* x = in->ops[0];
+    Inst* d = in->ops[1];
+    if (d->op != Opc::Const || d->imm < 2 || (d->imm & (d->imm - 1)) != 0) return false;
+    int k = 0;
+    while ((1LL << k) != d->imm) k++;
+
+    std::set<const Inst*> checking;
+    Inst* result;
+    if (nonNegative(x, checking)) {
+        result = in->op == Opc::Div ? insertBefore(f, in, Opc::Shr, IrType::S32, {x, intBefore(f, in, k)})
+                                    : insertBefore(f, in, Opc::And, IrType::S32, {x, intBefore(f, in, d->imm - 1)});
+    } else {
+        Inst* sign = insertBefore(f, in, Opc::Shr, IrType::S32, {x, intBefore(f, in, 31)});  // -1 if x < 0, else 0
+        Inst* bias = insertBefore(f, in, Opc::And, IrType::S32, {sign, intBefore(f, in, d->imm - 1)});
+        Inst* t = insertBefore(f, in, Opc::Add, IrType::S32, {x, bias});
+        if (in->op == Opc::Div) {
+            result = insertBefore(f, in, Opc::Shr, IrType::S32, {t, intBefore(f, in, k)});
+        } else {
+            Inst* rounded = insertBefore(f, in, Opc::And, IrType::S32, {t, intBefore(f, in, -d->imm)});
+            result = insertBefore(f, in, Opc::Sub, IrType::S32, {x, rounded});
+        }
+    }
+    replaceAllUses(f, in, result);
+    eraseInst(in);
+    return true;
+}
+
 // x + 0 -> x, x * 1 -> x, x * 0 -> 0, ... Only for i32: for floats most of
 // these are not exact (x + 0.0 is wrong for x = -0.0; x * 0.0 is wrong for NaN).
 bool simplifyAlgebra(IrFunction& f, Inst* in) {
@@ -181,6 +255,13 @@ bool simplifyAlgebra(IrFunction& f, Inst* in) {
     Inst* same = nullptr;  // set if the instruction just gives back this value
     if (in->op == Opc::ElemAddr && isInt(b, 0)) same = a;  // the address of p[0] is p
     if (in->type != IrType::S32 && !same) return false;
+    // (x + c1) + c2 -> x + (c1 + c2). Turns the unrolled loop's i+1+1+1 into i+3.
+    if (in->op == Opc::Add && isConst(b) && a->op == Opc::Add && isConst(a->ops[1])) {
+        in->ops = {a->ops[0], intBefore(f, in, static_cast<int32_t>(static_cast<uint32_t>(a->ops[1]->imm) +
+                                                                     static_cast<uint32_t>(b->imm)))};
+        return true;
+    }
+    if ((in->op == Opc::Div || in->op == Opc::Rem) && divideByPowerOfTwo(f, in)) return true;
     switch (in->op) {
         case Opc::Add:
         case Opc::Or:

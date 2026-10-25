@@ -50,7 +50,10 @@ struct Var {
 struct Function;
 
 // Functions that are built into the language (sema recognizes them by name).
-enum class BuiltinFn { None, Sqrt, Abs, Min, Max, AtomicAdd, Barrier };
+enum class BuiltinFn {
+    None, Sqrt, Abs, Min, Max, Popc, AtomicAdd, Barrier,
+    LaneId, WarpSum, ShflDown, ShflXor, Ballot,  // warp-level: the 32 threads of a warp work together
+};
 
 enum class ExprKind {
     IntLit,    // 42

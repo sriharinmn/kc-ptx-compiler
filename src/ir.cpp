@@ -16,16 +16,21 @@ bool isPure(Opc op) {
         case Opc::Neg: case Opc::Not:
         case Opc::Lt: case Opc::Le: case Opc::Gt: case Opc::Ge: case Opc::Eq: case Opc::Ne:
         case Opc::CvtI2F: case Opc::CvtF2I:
-        case Opc::Min: case Opc::Max: case Opc::Abs: case Opc::Sqrt:
+        case Opc::Min: case Opc::Max: case Opc::Abs: case Opc::Sqrt: case Opc::Popc:
         case Opc::ElemAddr: case Opc::SharedAddr:
             return true;
         default:
-            return false;  // Param, Load, Phi, memory writes, calls, jumps
+            return false;  // Param, Load, Phi, memory writes, warp operations, calls, jumps
     }
 }
 
+bool isWarpOp(Opc op) { return op == Opc::WarpSum || op == Opc::ShflDown || op == Opc::ShflXor || op == Opc::Ballot; }
+
+// A warp operation's result depends on which threads run it together, so it
+// must stay exactly where the programmer put it (like LLVM's "convergent").
 bool hasSideEffects(Opc op) {
-    return op == Opc::Store || op == Opc::AtomicAdd || op == Opc::Barrier || op == Opc::Call || isTerminator(op);
+    return op == Opc::Store || op == Opc::AtomicAdd || op == Opc::Barrier || op == Opc::Call || isWarpOp(op) ||
+           isTerminator(op);
 }
 
 Inst* Block::terminator() const {
@@ -147,6 +152,11 @@ const char* opcName(Opc op) {
         case Opc::Max: return "max";
         case Opc::Abs: return "abs";
         case Opc::Sqrt: return "sqrt";
+        case Opc::Popc: return "popc";
+        case Opc::WarpSum: return "warp_sum";
+        case Opc::ShflDown: return "shfl_down";
+        case Opc::ShflXor: return "shfl_xor";
+        case Opc::Ballot: return "ballot";
         case Opc::ElemAddr: return "elemaddr";
         case Opc::SharedAddr: return "sharedaddr";
         case Opc::Load: return "load";

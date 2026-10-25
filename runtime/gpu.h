@@ -31,10 +31,11 @@ private:
     CUcontext ctx_ = nullptr;
 };
 
-// PTX loaded onto the GPU.
+// GPU code loaded onto the GPU.
 class Module {
 public:
-    explicit Module(const std::string& ptx);  // JIT-compiles; throws with ptxas' error log on failure
+    explicit Module(const std::string& ptx);         // JIT-compiles; throws with ptxas' error log on failure
+    explicit Module(const std::vector<char>& cubin);  // already compiled machine code (see ptx_compiler.h)
     ~Module();
     Module(Module&& other) noexcept;
     Module(const Module&) = delete;
@@ -64,6 +65,9 @@ public:
     DeviceBuffer(const DeviceBuffer&) = delete;
     DeviceBuffer& operator=(const DeviceBuffer&) = delete;
 
+    void upload(const std::vector<T>& host) { cuCheck(cuMemcpyHtoD(ptr_, host.data(), bytes()), "cuMemcpyHtoD"); }
+    void clear() { cuCheck(cuMemsetD8(ptr_, 0, bytes()), "cuMemsetD8"); }
+
     std::vector<T> download() const {
         std::vector<T> host(count_);
         cuCheck(cuMemcpyDtoH(host.data(), ptr_, bytes()), "cuMemcpyDtoH");
@@ -82,3 +86,7 @@ private:
 // Runs kernel f on a 1-D grid of 'blocks' blocks with 'threads' threads each, then waits for it.
 // args[i] points to the value of the i-th kernel parameter.
 void launch(CUfunction f, unsigned blocks, unsigned threads, std::vector<void*> args);
+
+// Average time of one launch in milliseconds, measured on the GPU with CUDA events
+// (after one warm-up launch). The launches run back to back, without waiting in between.
+float timeKernelMs(CUfunction f, unsigned blocks, unsigned threads, std::vector<void*> args, int reps);

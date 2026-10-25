@@ -4,8 +4,9 @@
 For every example, at -O0 and -O1, prints:
   - PTX instructions   (what kc writes)
   - SASS instructions  (the real GPU machine code ptxas makes from it)
-  - registers          (per thread, from ptxas -v; fewer = more threads can run at once)
   - calls              (CALL instructions left in the SASS)
+  - registers          (per thread, from ptxas -v)
+and, for the kernels that bench/kernels.cu also has, the SASS size of nvcc's version.
 
 Run inside WSL after building:  python3 tools/measure.py
 """
@@ -31,8 +32,7 @@ def ptx_instructions(ptx):
                if line.startswith("\t") and line.endswith(";") and not line.startswith("\t."))
 
 
-def sass_stats(cubin):
-    sass = run(CUDA / "cuobjdump", "-sass", cubin).stdout
+def sass_stats(sass):
     count = calls = 0
     for m in re.finditer(r"/\*([0-9a-f]{4})\*/\s+([^;]*);", sass):
         addr, text = int(m.group(1), 16), m.group(2).strip()
@@ -55,26 +55,37 @@ def measure(example, level, tmp):
     # ptxas -v prints one "Used N registers" line per function; the kernel's comes after "entry function".
     kernel_info = info[info.find("entry function"):]
     regs = int(re.search(r"Used (\d+) registers", kernel_info).group(1))
-    sass, calls = sass_stats(cubin)
+    sass, calls = sass_stats(run(CUDA / "cuobjdump", "-sass", cubin).stdout)
     return ptx_instructions(ptx), sass, regs, calls
+
+
+def nvcc_sass(tmp):
+    """SASS size of each kernel in bench/kernels.cu, compiled by nvcc."""
+    cubin = tmp / "nvcc.cubin"
+    run(CUDA / "nvcc", "-cubin", f"-arch={ARCH}", ROOT / "bench" / "kernels.cu", "-o", cubin)
+    sass = run(CUDA / "cuobjdump", "-sass", cubin).stdout
+    sizes = {}
+    for part in re.split(r"\n\s*Function : ", sass)[1:]:
+        sizes[part.split()[0]] = sass_stats(part)[0]
+    return sizes
 
 
 def main():
     rows = []
     with tempfile.TemporaryDirectory() as d:
+        nvcc = nvcc_sass(Path(d))
         for example in sorted((ROOT / "examples").glob("*.kc")):
+            kernel = re.search(r"kernel (\w+)", example.read_text()).group(1)
             o0 = measure(example, 0, Path(d))
             o1 = measure(example, 1, Path(d))
-            rows.append((example.name, o0, o1))
+            rows.append((example.name, o0, o1, nvcc.get(kernel)))
 
-    print(f"| example | PTX -O0 | PTX -O1 | SASS -O0 | SASS -O1 | registers -O0 | registers -O1 |")
-    print(f"|---|---:|---:|---:|---:|---:|---:|")
-    for name, o0, o1 in rows:
+    print("| example | PTX -O0 | PTX -O1 | SASS -O0 | SASS -O1 | SASS nvcc | registers -O0 | registers -O1 |")
+    print("|---|---:|---:|---:|---:|---:|---:|---:|")
+    for name, o0, o1, nv in rows:
         sass0 = f"{o0[1]}" + (f" ({o0[3]} calls)" if o0[3] else "")
         sass1 = f"{o1[1]}" + (f" ({o1[3]} calls)" if o1[3] else "")
-        print(f"| {name} | {o0[0]} | {o1[0]} | {sass0} | {sass1} | {o0[2]} | {o1[2]} |")
-    total = [sum(r[i][j] for r in rows) for i in (1, 2) for j in (0, 1)]
-    print(f"| **total** | {total[0]} | {total[2]} | {total[1]} | {total[3]} | | |")
+        print(f"| {name} | {o0[0]} | {o1[0]} | {sass0} | {sass1} | {nv if nv else '-'} | {o0[2]} | {o1[2]} |")
 
 
 if __name__ == "__main__":

@@ -78,6 +78,8 @@ int main(int argc, char** argv) {
         std::cerr << input << ": " << e.what() << "\n";
         return 3;
     }
+    std::istringstream warnings(result.warnings);
+    for (std::string w; std::getline(warnings, w);) std::cerr << input << ":" << w << "\n";
 
     if (emitTokens) std::cout << result.tokens << "\n";
     if (emitAst) std::cout << result.ast;

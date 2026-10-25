@@ -2,10 +2,13 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstdlib>
 #include <cstdio>
 #include <cstring>
 #include <map>
 #include <sstream>
+
+#include "divergence.h"
 
 // Leaving SSA ("phi elimination"):
 // PTX has no phi instruction, so each phi gets two registers:
@@ -66,9 +69,18 @@ std::string sfx(IrType t) {
     return "";
 }
 
+// "sm_89" -> 89. Decides which instructions the target GPU has.
+int smNumber(const std::string& arch) {
+    return arch.rfind("sm_", 0) == 0 ? std::atoi(arch.c_str() + 3) : 0;
+}
+
+// Warp instructions name the threads that take part (the "member mask"): all 32 of them.
+const char* const kFullWarp = "0xffffffff";
+
 class FunctionEmitter {
 public:
-    FunctionEmitter(const IrFunction& fn, int index) : fn_(fn), index_(index) {}
+    FunctionEmitter(const IrFunction& fn, int index, int sm)
+        : fn_(fn), index_(index), sm_(sm), divergence_(analyzeDivergence(fn)) {}
 
     std::string run() {
         // 1. Give every value a register (and every phi a mailbox).
@@ -112,6 +124,8 @@ private:
 
     const IrFunction& fn_;
     int index_;
+    int sm_;  // target architecture number, e.g. 89
+    DivergenceInfo divergence_;
     std::ostringstream body_;
     std::map<const Inst*, std::string> reg_;
     std::map<const Inst*, std::string> mailbox_;
@@ -204,6 +218,11 @@ private:
             case Opc::Abs: ins("abs." + sfx(in->type) + " " + r(in) + ", " + r(in->ops[0])); break;
             // sqrt.rn = IEEE-correct square root (nvcc's default too).
             case Opc::Sqrt: ins("sqrt.rn.f32 " + r(in) + ", " + r(in->ops[0])); break;
+            case Opc::Popc: ins("popc.b32 " + r(in) + ", " + r(in->ops[0])); break;
+            case Opc::WarpSum: warpSum(in); break;
+            case Opc::ShflDown: shuffle("down", r(in), r(in->ops[0]), r(in->ops[1])); break;
+            case Opc::ShflXor: shuffle("bfly", r(in), r(in->ops[0]), r(in->ops[1])); break;  // "butterfly" = XOR
+            case Opc::Ballot: ins("vote.sync.ballot.b32 " + r(in) + ", " + r(in->ops[0]) + ", " + kFullWarp); break;
             case Opc::ElemAddr: {
                 // addr = base + index * 4   (mul.wide gives a 64-bit result from 32-bit inputs)
                 if (isImmediate(in->ops[1])) {  // constant index: the byte offset is known now
@@ -239,6 +258,31 @@ private:
     }
 
     static std::string space(const Inst* in) { return in->shared ? ".shared" : ".global"; }
+
+    // shfl.sync.<mode>.b32 d, value, lane, 0x1f, mask. 0x1f says the whole warp is one group.
+    // .b32 means "any 32 bits", so the same instruction moves i32 and f32 values.
+    void shuffle(const std::string& mode, const std::string& dst, const std::string& value, const std::string& lane) {
+        ins("shfl.sync." + mode + ".b32 " + dst + ", " + value + ", " + lane + ", 0x1f, " + kFullWarp);
+    }
+
+    // warp_sum, the same source code with a different lowering per GPU generation:
+    //   sm_80 and newer, i32: one instruction, redux.sync (the hardware adds across the warp)
+    //   older GPUs, or f32:   5 butterfly shuffles. After adding the value from 16, 8, 4, 2
+    //                         and 1 lanes away, every thread holds the sum of all 32.
+    void warpSum(const Inst* in) {
+        if (in->type == IrType::S32 && sm_ >= 80) {
+            ins("redux.sync.add.s32 " + r(in) + ", " + r(in->ops[0]) + ", " + kFullWarp);
+            return;
+        }
+        std::string sum = r(in->ops[0]);
+        for (int distance = 16; distance >= 1; distance /= 2) {
+            std::string other = newReg(in->type);
+            std::string next = distance == 1 ? r(in) : newReg(in->type);
+            shuffle("bfly", other, sum, std::to_string(distance));
+            ins("add." + sfx(in->type) + " " + next + ", " + sum + ", " + other);
+            sum = next;
+        }
+    }
 
     // Reads a .param slot into a register. A bool arrives as a 32-bit 0/1 and becomes a predicate.
     void readParam(const std::string& dst, IrType t, const std::string& slot) {
@@ -336,12 +380,15 @@ private:
                 const std::string& c = r(t->ops[0]);
                 const Block* yes = t->targets[0];
                 const Block* no = t->targets[1];
+                // The divergence analysis knows when every thread decides the same way:
+                // then the branch is marked .uni too.
+                std::string bra = divergence_.divergent(t->ops[0]) ? " bra " : " bra.uni ";
                 if (no == next) {
-                    ins("@" + c + " bra " + label(yes));
+                    ins("@" + c + bra + label(yes));
                 } else if (yes == next) {
-                    ins("@!" + c + " bra " + label(no));
+                    ins("@!" + c + bra + label(no));
                 } else {
-                    ins("@" + c + " bra " + label(yes));
+                    ins("@" + c + bra + label(yes));
                     ins("bra.uni " + label(no));
                 }
                 break;
@@ -382,6 +429,7 @@ std::string emitPtx(const IrModule& m, const std::string& arch) {
         }
     }
 
-    for (size_t i = 0; i < m.funcs.size(); ++i) out << "\n" << FunctionEmitter(*m.funcs[i], static_cast<int>(i)).run();
+    for (size_t i = 0; i < m.funcs.size(); ++i)
+        out << "\n" << FunctionEmitter(*m.funcs[i], static_cast<int>(i), smNumber(arch)).run();
     return out.str();
 }

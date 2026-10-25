@@ -49,17 +49,27 @@ std::string optimize(IrModule& m, int level) {
     verifyModule(m, "inline");
 
     int counts[kNumPasses] = {};
-    for (const auto& f : m.funcs) {
+    auto rounds = [&](IrFunction& f) {
         for (int round = 0; round < kMaxRounds; ++round) {
             int changes = 0;
             for (int p = 0; p < kNumPasses; ++p) {
-                int n = kPasses[p].run(*f);
-                verifyFunction(*f, kPasses[p].name);
+                int n = kPasses[p].run(f);
+                verifyFunction(f, kPasses[p].name);
                 counts[p] += n;
                 changes += n;
             }
             if (changes == 0) break;
         }
+    };
+    int unrolled = 0;
+    for (const auto& f : m.funcs) {
+        rounds(*f);
+        // Unrolling comes after the first rounds, so loops are already clean (invariants
+        // moved out), and the copies it makes get cleaned up by one more set of rounds.
+        int n = unrollLoops(*f);
+        verifyFunction(*f, "unroll");
+        if (n) rounds(*f);
+        unrolled += n;
         f->renumber();
     }
 
@@ -68,6 +78,7 @@ std::string optimize(IrModule& m, int level) {
 
     std::string report = line("inline", inlined, "calls inlined");
     for (int p = 0; p < kNumPasses; ++p) report += line(kPasses[p].name, counts[p], kPasses[p].what);
+    report += line("unroll", unrolled, "loops unrolled 4x");
     report += line("cleanup", removedFns, "device functions deleted (no calls left)");
     report += "IR size: " + std::to_string(sizeBefore) + " -> " + std::to_string(totalInsts(m)) + " instructions\n";
     return report;

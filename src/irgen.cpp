@@ -124,8 +124,9 @@ private:
         cur_ = nullptr;
     }
 
-    void condBranch(Inst* cond, Block* ifTrue, Block* ifFalse) {
+    void condBranch(Inst* cond, Block* ifTrue, Block* ifFalse, Loc loc) {
         Inst* br = emit(Opc::CondBr, IrType::Void, {cond});
+        br->loc = loc;  // the condition, named in divergence warnings
         br->targets = {ifTrue, ifFalse};
         ifTrue->preds.push_back(cur_);
         ifFalse->preds.push_back(cur_);
@@ -309,7 +310,7 @@ private:
         Block* thenB = fn_.newBlock();
         Block* elseB = s.elseBody.empty() ? nullptr : fn_.newBlock();
         Block* join = fn_.newBlock();
-        condBranch(c, thenB, elseB ? elseB : join);
+        condBranch(c, thenB, elseB ? elseB : join, s.cond->loc);
         seal(thenB);
         if (elseB) seal(elseB);
 
@@ -343,7 +344,7 @@ private:
         Block* bodyB = fn_.newBlock();
         Block* exit = fn_.newBlock();
         Block* stepB = step ? fn_.newBlock() : nullptr;
-        condBranch(c, bodyB, exit);
+        condBranch(c, bodyB, exit, cond.loc);
         seal(bodyB);
 
         Block* next = stepB ? stepB : header;
@@ -440,7 +441,28 @@ private:
                 Inst* b = expr(*e.kids[1]);
                 return emit(e.builtin == BuiltinFn::Min ? Opc::Min : Opc::Max, type, {a, b});
             }
-            case BuiltinFn::Barrier: return emit(Opc::Barrier, IrType::Void);
+            case BuiltinFn::Popc: return emit(Opc::Popc, type, {expr(*e.kids[0])});
+            case BuiltinFn::LaneId: {
+                Inst* in = emit(Opc::SReg, type);
+                in->name = "laneid";
+                return in;
+            }
+            case BuiltinFn::Barrier:
+            case BuiltinFn::WarpSum:
+            case BuiltinFn::Ballot:
+            case BuiltinFn::ShflDown:
+            case BuiltinFn::ShflXor: {
+                std::vector<Inst*> args;
+                for (const auto& arg : e.kids) args.push_back(expr(*arg));
+                Opc op = e.builtin == BuiltinFn::Barrier   ? Opc::Barrier
+                         : e.builtin == BuiltinFn::WarpSum ? Opc::WarpSum
+                         : e.builtin == BuiltinFn::Ballot  ? Opc::Ballot
+                         : e.builtin == BuiltinFn::ShflDown ? Opc::ShflDown
+                                                            : Opc::ShflXor;
+                Inst* in = emit(op, type, args);
+                in->loc = e.loc;  // for the divergence warnings
+                return in;
+            }
             case BuiltinFn::AtomicAdd: {
                 const Expr& target = *e.kids[0];
                 Inst* addr = elemAddr(target);
@@ -465,9 +487,9 @@ private:
         Block* rhsB = fn_.newBlock();
         Block* join = fn_.newBlock();
         if (e.op == Op::LogAnd)
-            condBranch(lhs, rhsB, join);  // lhs false: result is lhs (false)
+            condBranch(lhs, rhsB, join, e.loc);  // lhs false: result is lhs (false)
         else
-            condBranch(lhs, join, rhsB);  // lhs true: result is lhs (true)
+            condBranch(lhs, join, rhsB, e.loc);  // lhs true: result is lhs (true)
         seal(rhsB);
 
         startBlock(rhsB);

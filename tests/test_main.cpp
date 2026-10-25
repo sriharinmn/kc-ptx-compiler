@@ -48,9 +48,10 @@ std::string readFile(const std::string& path) {
 std::string example(const std::string& name) { return readFile(std::string(KC_SOURCE_DIR) + "/examples/" + name); }
 
 // Compile kc source for this GPU and load it (the driver JIT-compiles the PTX).
-Module build(Gpu& gpu, const std::string& source) {
+// 'arch' can name an older GPU: PTX for sm_75 also runs on newer GPUs.
+Module build(Gpu& gpu, const std::string& source, const std::string& arch = "") {
     CompileOptions opts;
-    opts.arch = gpu.arch();
+    opts.arch = arch.empty() ? gpu.arch() : arch;
     opts.optLevel = gOptLevel;
     Module m(compile(source, opts).ptx);
     if (gVerbose) std::printf("%s", m.jitLog().c_str());
@@ -105,6 +106,18 @@ void expectError(const std::string& source, const std::string& expected) {
         return;
     }
     throw TestFailure("program compiled, but it should fail with: " + expected);
+}
+
+int countOf(const std::string& text, const std::string& what) {
+    int n = 0;
+    for (size_t at = text.find(what); at != std::string::npos; at = text.find(what, at + 1)) n++;
+    return n;
+}
+
+std::string ptxAt(const std::string& source, int level) {
+    CompileOptions opts;
+    opts.optLevel = level;
+    return compile(source, opts).ptx;
 }
 
 // ---- tests ----------------------------------------------------------------
@@ -678,6 +691,71 @@ void testSharedAtomics(Gpu& gpu) {
     checkFloats(dtotal.download(), {sum});
 }
 
+// warp_sum is one redux.sync instruction on sm_80+, and 5 shuffles on older GPUs.
+// PTX made for sm_75 also runs on this GPU, so both versions are tested here.
+void testWarpReduce(Gpu& gpu) {
+    const int n = 100000;
+    std::vector<int> x = randomInts(n, 24, -100, 100);
+    int want = 0;
+    for (int v : x) want += v;
+    for (const char* arch : {"sm_89", "sm_75"}) {
+        Module m = build(gpu, example("warp_reduce.kc"), arch);
+        DeviceBuffer<int> dx(x), dout(1);
+        int nArg = n;
+        launch(m.kernel("warp_reduce"), blocksFor(n, 256), 256, {dx.arg(), dout.arg(), &nArg});
+        int got = dout.download()[0];
+        if (got != want)
+            throw TestFailure(std::string(arch) + ": got " + std::to_string(got) + ", want " + std::to_string(want));
+    }
+}
+
+void testWarpBuiltins(Gpu& gpu) {
+    const char* source = R"(
+        kernel warp_ops(x: *i32, f: *f32, out: *i32, outF: *f32) {
+            let t = threadIdx.x;
+            let v = x[t];
+            out[6 * t] = lane_id();
+            out[6 * t + 1] = warp_sum(v);
+            out[6 * t + 2] = shfl_down(v, 1);
+            out[6 * t + 3] = shfl_xor(v, 3);
+            out[6 * t + 4] = ballot(v > 0);
+            out[6 * t + 5] = popc(ballot(v > 0));
+            outF[2 * t] = warp_sum(f[t]);
+            outF[2 * t + 1] = shfl_down(f[t], 4);
+        }
+    )";
+    const int threads = 64;  // two warps
+    std::vector<int> x = randomInts(threads, 25, -50, 50), want(6 * threads);
+    std::vector<int> fi = randomInts(threads, 26, -1000, 1000);  // whole numbers: float sums are exact
+    std::vector<float> f(fi.begin(), fi.end()), wantF(2 * threads);
+    for (int t = 0; t < threads; ++t) {
+        int lane = t % 32, base = t - lane;
+        int sum = 0, mask = 0;
+        float fsum = 0;
+        for (int l = 0; l < 32; ++l) {
+            sum += x[base + l];
+            fsum += f[base + l];
+            if (x[base + l] > 0) mask |= static_cast<int>(1u << l);
+        }
+        want[6 * t] = lane;
+        want[6 * t + 1] = sum;
+        want[6 * t + 2] = lane + 1 < 32 ? x[t + 1] : x[t];  // past the last lane: keeps its own value
+        want[6 * t + 3] = x[base + (lane ^ 3)];
+        want[6 * t + 4] = mask;
+        want[6 * t + 5] = __builtin_popcount(static_cast<unsigned>(mask));
+        wantF[2 * t] = fsum;
+        wantF[2 * t + 1] = lane + 4 < 32 ? f[t + 4] : f[t];
+    }
+    for (const char* arch : {"sm_89", "sm_75"}) {
+        Module m = build(gpu, source, arch);
+        DeviceBuffer<int> dx(x), dout(6 * threads);
+        DeviceBuffer<float> df(f), doutF(2 * threads);
+        launch(m.kernel("warp_ops"), 1, threads, {dx.arg(), df.arg(), dout.arg(), doutF.arg()});
+        checkInts(dout.download(), want);
+        checkFloats(doutF.download(), wantF);
+    }
+}
+
 // At -O0 the GPU computes these; at -O1 the optimizer folds them on the CPU.
 // Both must give exactly the GPU's answers, bit for bit, including the odd cases.
 void testConstantFolding(Gpu& gpu) {
@@ -722,6 +800,50 @@ void testConstantFolding(Gpu& gpu) {
                               std::to_string(wantF[i]) + " (compared bit for bit)");
 }
 
+// At -O1, x / 2^k and x % 2^k become shifts and masks (ptxas would emit a whole
+// division routine). Negative x needs a correction so it still rounds toward zero.
+void testDivisionByPowersOfTwo(Gpu& gpu) {
+    const char* source = R"(
+        kernel pow2(x: *i32, out: *i32, n: i32) {
+            let i = blockIdx.x * blockDim.x + threadIdx.x;
+            if (i < n) {
+                let v = x[i];
+                out[6 * i] = v / 2;
+                out[6 * i + 1] = v / 8;
+                out[6 * i + 2] = v % 2;
+                out[6 * i + 3] = v % 16;
+                out[6 * i + 4] = threadIdx.x / 4;    // never negative: a single shift
+                out[6 * i + 5] = threadIdx.x % 32;   // never negative: a single and
+            }
+        }
+    )";
+    if (gOptLevel == 1) {
+        std::string ptx = ptxAt(source, 1);
+        CHECK(countOf(ptx, "div.s32") == 0 && countOf(ptx, "rem.s32") == 0);
+    }
+    Module m = build(gpu, source);
+    const int n = 2000;
+    std::vector<int> x = randomInts(n, 27, -100000, 100000), want(6 * n);
+    x[0] = INT32_MIN;  // the corner cases
+    x[1] = INT32_MAX;
+    x[2] = -1;
+    x[3] = -7;
+    for (int i = 0; i < n; ++i) {
+        int v = x[i], t = i % 128;  // launched with 128 threads per block
+        int* o = &want[6 * i];
+        o[0] = v / 2;  // C++ rounds toward zero, like PTX's div.s32
+        o[1] = v / 8;
+        o[2] = v % 2;
+        o[3] = v % 16;
+        o[4] = t / 4;
+        o[5] = t % 32;
+    }
+    DeviceBuffer<int> dx(x), dout(6 * n);
+    int nArg = n;
+    launch(m.kernel("pow2"), blocksFor(n, 128), 128, {dx.arg(), dout.arg(), &nArg});
+    checkInts(dout.download(), want);
+}
+
 // CSE may reuse a load only if memory cannot have changed in between.
 void testLoadsAfterStoresAndBarriers(Gpu& gpu) {
     Module m = build(gpu, R"(
@@ -746,18 +868,6 @@ void testLoadsAfterStoresAndBarriers(Gpu& gpu) {
     DeviceBuffer<int> dp(p), dout(64);
     launch(m.kernel("k"), 1, 64, {dp.arg(), dout.arg()});
     checkInts(dout.download(), want);
-}
-
-int countOf(const std::string& text, const std::string& what) {
-    int n = 0;
-    for (size_t at = text.find(what); at != std::string::npos; at = text.find(what, at + 1)) n++;
-    return n;
-}
-
-std::string ptxAt(const std::string& source, int level) {
-    CompileOptions opts;
-    opts.optLevel = level;
-    return compile(source, opts).ptx;
 }
 
 // Each pass does the job it is meant to do (checked in the PTX it produces).
@@ -792,6 +902,37 @@ void testOptimizerPasses(Gpu&) {
     CHECK(countOf(folded, "st.global.u32 \t[%rd0], 14;") == 1);
     // the same input always gives the same output
     CHECK(ptxAt(example("matmul.kc"), 1) == ptxAt(example("matmul.kc"), 1));
+}
+
+std::string warningsFor(const std::string& source) { return compile(source).warnings; }
+
+// barrier() and warp operations need every thread; the divergence analysis warns
+// when only some threads can reach them, and stays quiet when all threads do.
+void testDivergenceWarnings(Gpu&) {
+    auto expectWarning = [](const std::string& source, const std::string& expected) {
+        std::string w = warningsFor(source);
+        if (w.find(expected) == std::string::npos)
+            throw TestFailure("expected a warning containing \"" + expected + "\", got: \"" + w + "\"");
+    };
+    auto expectQuiet = [](const std::string& source) {
+        std::string w = warningsFor(source);
+        if (!w.empty()) throw TestFailure("unexpected warning: " + w);
+    };
+    // depends on threadIdx: warn, and name the line of the branch
+    expectWarning("kernel k() {\n if (threadIdx.x < 16) {\n  barrier();\n }\n}", "3:3: warning: barrier() is only "
+                  "reached by some threads of the block (the branch on line 2");
+    // threads that returned early never reach the barrier
+    expectWarning("kernel k(n: i32) {\n let i = blockIdx.x * blockDim.x + threadIdx.x;\n if (i >= n) { return; }\n"
+                  " barrier();\n}", "4:2: warning: barrier()");
+    // the loop counter differs between threads after a loop they leave at different times
+    expectWarning("kernel k() {\n let c = 0;\n while (c < threadIdx.x) { c += 1; }\n if (c > 3) { barrier(); }\n}",
+                  "the branch on line 4");
+    expectWarning("kernel k(x: *i32, n: i32) {\n let i = threadIdx.x;\n if (i < n) { x[i] = warp_sum(x[i]); }\n}",
+                  "warp_sum() needs all 32 threads");
+    // uniform conditions: blockIdx, parameters, a value loaded from one address, a uniform loop
+    expectQuiet("kernel k(x: *f32, n: i32) {\n if (blockIdx.x == 0) { barrier(); }\n if (n > 5) { barrier(); }\n"
+                " if (x[0] > 0.0) { barrier(); }\n for (let s = 0; s < n; s += 1) { barrier(); }\n}");
+    for (const char* name : {"reduce.kc", "warp_reduce.kc", "histogram.kc", "matmul.kc"}) expectQuiet(example(name));
 }
 
 // Appends an instruction to block b (for building IR by hand).
@@ -870,6 +1011,11 @@ void testCompileErrors(Gpu&) {
     expectError("kernel k() { let x = nope(1); }", "unknown function 'nope'");
     expectError("kernel k() { shared s: f32[4]; s = s; }", "cannot assign to shared array");
     expectError("fn sqrt(x: f32) -> f32 { return x; }", "built-in function");
+    // session 4: warp builtins
+    expectError("kernel k() { let s = warp_sum(true); }", "warp_sum needs an i32 or f32");
+    expectError("kernel k() { let b = ballot(1); }", "ballot needs a bool");
+    expectError("kernel k() { let v = shfl_down(1.0, 2.0); }", "an i32 lane offset");
+    expectError("kernel k() { let c = popc(1.5); }", "popc needs an i32");
 }
 
 struct Test {
@@ -900,10 +1046,14 @@ const Test kTests[] = {
     {"break and continue", testBreakContinue},
     {"sqrt, abs, min, max", testMathBuiltins},
     {"atomics on shared memory and on f32", testSharedAtomics},
+    {"warp_reduce.kc (redux.sync on sm_89, shuffles on sm_75)", testWarpReduce},
+    {"warp builtins: lane_id, warp_sum, shfl_down, shfl_xor, ballot, popc", testWarpBuiltins},
     {"constant folding gives the GPU's answers, bit for bit", testConstantFolding},
     {"loads are not reused across stores and barriers", testLoadsAfterStoresAndBarriers},
+    {"division by powers of two becomes shifts (also for negative numbers)", testDivisionByPowersOfTwo},
     {"optimizer passes: inline, cse, licm, simplify, dce", testOptimizerPasses},
     {"IR verifier catches broken IR", testVerifier},
+    {"divergence warnings: barrier() and warp ops reached by some threads", testDivergenceWarnings},
     {"compile errors are reported", testCompileErrors},
 };
 

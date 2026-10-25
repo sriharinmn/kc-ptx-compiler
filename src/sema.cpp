@@ -23,6 +23,10 @@ const std::map<std::string, BuiltinFn> kBuiltins = {
     {"sqrt", BuiltinFn::Sqrt}, {"abs", BuiltinFn::Abs},
     {"min", BuiltinFn::Min},   {"max", BuiltinFn::Max},
     {"atomic_add", BuiltinFn::AtomicAdd}, {"barrier", BuiltinFn::Barrier},
+    {"popc", BuiltinFn::Popc},
+    {"lane_id", BuiltinFn::LaneId},       {"warp_sum", BuiltinFn::WarpSum},
+    {"shfl_down", BuiltinFn::ShflDown},   {"shfl_xor", BuiltinFn::ShflXor},
+    {"ballot", BuiltinFn::Ballot},
 };
 
 constexpr int kMaxSharedBytes = 48 * 1024;  // what every CUDA GPU allows per block by default
@@ -322,6 +326,31 @@ private:
                     throw CompileError(e.kids[1]->loc, "atomic_add on an " + typeName(e.kids[0]->type) +
                                                            " element needs an " + typeName(e.kids[0]->type) + " value");
                 return e.kids[0]->type;  // the old value, before the add
+            case BuiltinFn::Popc:
+                args(1);
+                if (!isI32(e.kids[0]->type))
+                    throw CompileError(e.loc, "popc needs an i32, not " + typeName(e.kids[0]->type));
+                return scalar(Base::I32);
+            case BuiltinFn::LaneId:
+                args(0);
+                return scalar(Base::I32);
+            case BuiltinFn::WarpSum:
+                args(1);
+                if (!isNumeric(e.kids[0]->type))
+                    throw CompileError(e.loc, "warp_sum needs an i32 or f32, not " + typeName(e.kids[0]->type));
+                return e.kids[0]->type;
+            case BuiltinFn::ShflDown:
+            case BuiltinFn::ShflXor:
+                args(2);
+                if (!isNumeric(e.kids[0]->type) || !isI32(e.kids[1]->type))
+                    throw CompileError(e.loc, "'" + e.name + "' needs an i32 or f32 value and an i32 lane offset, but got " +
+                                                  typeName(e.kids[0]->type) + " and " + typeName(e.kids[1]->type));
+                return e.kids[0]->type;
+            case BuiltinFn::Ballot:
+                args(1);
+                if (!isBool(e.kids[0]->type))
+                    throw CompileError(e.loc, "ballot needs a bool, not " + typeName(e.kids[0]->type));
+                return scalar(Base::I32);
             case BuiltinFn::None: break;
         }
         return scalar(Base::Void);

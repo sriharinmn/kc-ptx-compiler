@@ -100,10 +100,16 @@ private:
                 type(0, in->type);
                 type(1, in->type);
                 break;
-            case Opc::Neg: case Opc::Not: case Opc::Abs: case Opc::Sqrt:
+            case Opc::Neg: case Opc::Not: case Opc::Abs: case Opc::Sqrt: case Opc::Popc: case Opc::WarpSum:
                 count(1);
                 type(0, in->type);
                 break;
+            case Opc::ShflDown: case Opc::ShflXor:
+                count(2);
+                type(0, in->type);
+                type(1, IrType::S32);
+                break;
+            case Opc::Ballot: count(1); type(0, IrType::Pred); break;
             case Opc::Lt: case Opc::Le: case Opc::Gt: case Opc::Ge: case Opc::Eq: case Opc::Ne:
                 count(2);
                 type(1, in->ops[0]->type);

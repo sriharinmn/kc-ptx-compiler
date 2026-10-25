@@ -10,6 +10,7 @@
 //   3. cse        reuse a value that was already computed (common subexpressions)
 //   4. licm       move loop-invariant work out of loops
 //   5. dce        delete instructions whose result nobody uses
+//   then 6. unroll (simple counted loops, 4x) and the round of 2-5 again,
 //   finally: delete device functions that are no longer called.
 // The verifier (verify.h) checks the IR after every pass.
 
@@ -26,4 +27,5 @@ int simplify(IrFunction& f);
 int eliminateCommonSubexpressions(IrFunction& f);
 int hoistLoopInvariants(IrFunction& f);
 int removeDeadCode(IrFunction& f);
+int unrollLoops(IrFunction& f);
 int removeUncalledFunctions(IrModule& m);

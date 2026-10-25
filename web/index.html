@@ -151,6 +151,7 @@
     border-right: 1px solid var(--rule);
   }
   .gutter .bad { color: var(--fault); font-weight: 600; }
+  .gutter .warned { color: var(--ink); font-weight: 600; background: var(--marker); }
   .code-area { position: relative; flex: 1; min-width: 0; }
   .backdrop, textarea {
     position: absolute;
@@ -209,6 +210,7 @@
   #status { color: var(--ink); }
   #status.ok::before { content: ""; display: inline-block; width: 8px; height: 8px; margin-right: 8px; border-radius: 50%; background: var(--ok); }
   #status.error { color: var(--fault); }
+  #status.warn::before { content: ""; display: inline-block; width: 8px; height: 8px; margin-right: 8px; border-radius: 50%; background: var(--marker); box-shadow: 0 0 0 1px #a88a00; }
   #status button {
     font: inherit; color: inherit; background: none; border: 0; padding: 0;
     text-decoration: underline; text-underline-offset: 2px; cursor: pointer;
@@ -416,10 +418,21 @@ function renderOutput(r) {
   output.innerHTML = hl(text);
 }
 
+// Warnings come as "L:C: warning: message" lines.
+function warningsOf(r) {
+  return (r && !r.error && r.warnings ? r.warnings.trim().split("\n") : [])
+    .map((w) => /^(\d+):(\d+): warning: (.*)$/.exec(w)).filter(Boolean)
+    .map((m) => ({ line: +m[1], col: +m[2], text: m[3] }));
+}
+
 function renderEditor(r) {
   const lines = source.value.split("\n");
   const bad = r && r.error ? r.line : 0;
-  gutter.innerHTML = lines.map((_, i) => (i + 1 === bad ? `<div class="bad">${i + 1}</div>` : `<div>${i + 1}</div>`)).join("");
+  const warned = new Set(warningsOf(r).map((w) => w.line));
+  gutter.innerHTML = lines.map((_, i) => {
+    const cls = i + 1 === bad ? ' class="bad"' : warned.has(i + 1) ? ' class="warned"' : "";
+    return `<div${cls}>${i + 1}</div>`;
+  }).join("");
   backdrop.innerHTML = lines.map((l, i) => (i + 1 === bad ? `<span class="err-line">${escapeHtml(l) || " "}</span>` : escapeHtml(l))).join("\n") + "\n";
   syncScroll();
 }
@@ -434,6 +447,12 @@ function renderStatus(r, ms) {
     status.className = "error";
     status.innerHTML = `<button type="button" id="goto">Line ${r.line}, column ${r.col}</button>: ${escapeHtml(msg)}`;
     $("goto").onclick = () => jumpTo(r.line, r.col);
+  } else if (warningsOf(r).length) {
+    const all = warningsOf(r), w = all[0];
+    status.className = "warn";
+    status.innerHTML = `Compiled, with ${plural(all.length, "warning")}. ` +
+      `<button type="button" id="goto">Line ${w.line}, column ${w.col}</button>: ${escapeHtml(w.text)}`;
+    $("goto").onclick = () => jumpTo(w.line, w.col);
   } else {
     const info = summaries(r);
     status.className = "ok";
@@ -521,14 +540,18 @@ for (const btn of document.querySelectorAll(".stage[data-stage]")) {
   });
 }
 
-// Start-up: a link like index.html?example=reduce&stage=ir&opt=0 opens that example,
-// stage and optimization level; otherwise restore what this browser had last time.
+// Start-up: a link like index.html?example=reduce&stage=ir&opt=0&arch=sm_75 opens that
+// example, stage, optimization level and GPU; otherwise restore what this browser had last time.
 const params = new URLSearchParams(location.search);
 selected = STAGES[params.get("stage")] ? params.get("stage") : recall("kc-stage") || "ptx";
 const savedOpt = params.get("opt") || recall("kc-opt");
 if (savedOpt === "0" || savedOpt === "1") $("opt").value = savedOpt;
+if ([...$("arch").options].some((o) => o.value === params.get("arch"))) $("arch").value = params.get("arch");
 const saved = recall("kc-source");
-if (KC_EXAMPLES[params.get("example")]) {
+if (params.get("code")) {  // ?code=... opens any program from a link
+  source.value = params.get("code");
+  exampleSelect.value = "";
+} else if (KC_EXAMPLES[params.get("example")]) {
   source.value = KC_EXAMPLES[params.get("example")];
   exampleSelect.value = params.get("example");
 } else if (saved) {

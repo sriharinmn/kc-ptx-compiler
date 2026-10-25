@@ -11,6 +11,8 @@
 #include <string>
 #include <vector>
 
+#include "diag.h"
+
 // Types of IR values. They map 1:1 onto PTX register kinds.
 enum class IrType {
     Void,  // instruction produces no value (store, branch, ...)
@@ -30,12 +32,18 @@ enum class Opc {
     Lt, Le, Gt, Ge, Eq, Ne,  // comparisons: result is Pred
     CvtI2F, CvtF2I,          // i32 -> f32, f32 -> i32
     Min, Max, Abs, Sqrt,     // built-in math
+    Popc,                    // number of 1 bits
     ElemAddr,   // address of ops[0][ops[1]] (pointer + index * element size)
     SharedAddr, // address of the shared array called 'name'
     Load,       // value at address ops[0]
     Store,      // store ops[1] at address ops[0]
     AtomicAdd,  // atomically add ops[1] to the value at address ops[0]; result = old value
     Barrier,    // wait until every thread of the block gets here
+    // Warp operations: the 32 threads of a warp exchange values, so all 32 must run them together.
+    WarpSum,    // sum of ops[0] over the warp
+    ShflDown,   // ops[0] of the thread ops[1] lanes higher up in the warp
+    ShflXor,    // ops[0] of the thread whose lane number is (my lane XOR ops[1])
+    Ballot,     // a 32-bit mask: bit i = ops[0] of lane i
     Call,       // call function 'name' with arguments ops; result = its return value
     Phi,        // ops[i] is the value when coming from parent->preds[i]
     Br,         // jump to targets[0]
@@ -59,6 +67,7 @@ struct Inst {
     bool shared = false;           // Load / Store / AtomicAdd: shared memory instead of global
     int paramIndex = -1;           // Param
     std::string name;              // Param name, SReg name, SharedAddr array, or Call target
+    Loc loc;                       // where in the source it came from (set for branches, barriers, warp operations)
 
     // Set when a phi is removed during SSA construction; points to the value that replaced it.
     Inst* replacement = nullptr;
@@ -114,7 +123,9 @@ std::string printInst(const Inst* in);
 // effects. Two pure instructions with the same operands always give the same value.
 bool isPure(Opc op);
 // Must be kept even if nothing uses the result (writes memory, waits, calls, jumps).
+// Warp operations count too: the optimizer must never move, merge or delete them.
 bool hasSideEffects(Opc op);
+bool isWarpOp(Opc op);
 
 std::vector<Block*> successors(const Block* b);     // where b's terminator can jump
 int instCount(const IrFunction& f);

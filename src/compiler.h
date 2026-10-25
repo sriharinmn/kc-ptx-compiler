@@ -1,7 +1,7 @@
 #pragma once
 
 // The whole compiler pipeline in one call:
-//   source -> lex -> parse -> sema -> IR (SSA) -> optimizer -> PTX
+//   source -> lex -> parse -> sema -> IR (SSA) -> divergence warnings -> optimizer -> PTX
 
 #include <string>
 
@@ -18,6 +18,7 @@ struct CompileResult {
     std::string optIr;   // the SSA IR after the optimizer (empty at -O0)
     std::string passes;  // what each optimizer pass changed (empty at -O0)
     std::string ptx;     // the PTX assembly
+    std::string warnings;  // "L:C: warning: ..." lines (the program still compiles)
 };
 
 // Throws CompileError (see diag.h) if the program is invalid, and
