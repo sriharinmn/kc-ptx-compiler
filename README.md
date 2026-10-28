@@ -52,6 +52,8 @@ The full write-up, with the method and charts, is the technical report: [`docs/r
 
 ## Playground
 
+**Try it: [sriharinmn.github.io/kc-ptx-compiler](https://sriharinmn.github.io/kc-ptx-compiler/)**
+
 The same compiler, built to WebAssembly, runs in the browser (`web/index.html`, no server).
 Every stage updates as you type: tokens, syntax tree, SSA IR, optimized IR (with what each pass
 changed) and PTX.
