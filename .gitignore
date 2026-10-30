@@ -5,3 +5,9 @@ build/
 *.o
 __pycache__/
 fuzz_fail_*.kc
+CLAUDE.md
+AGENTS.md
+.claude/
+plan.md
+docs/guide.md
+docs/guide.pdf
